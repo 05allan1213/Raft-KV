@@ -35,15 +35,22 @@ protobuf_generate_cpp(ECHO_PROTO_SRCS ECHO_PROTO_HDRS "tests/rpc/echo.proto")
 add_subdirectory(src)
 
 # 6. 定义所有测试用的可执行文件
-add_executable(fiber_test tests/fiber_main.cpp)
+add_executable(fiber_test tests/fiber_test.cpp)
 add_executable(server tests/rpc/server.cpp ${ECHO_PROTO_SRCS})
 add_executable(client tests/rpc/client.cpp ${ECHO_PROTO_SRCS})
+add_executable(raft_test tests/raft_test.cpp)
+
 
 # 7. 设置测试目标的包含路径
 target_include_directories(server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(client PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(raft_test PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}      # 用于找到 .pb.h 文件
+    ${CMAKE_SOURCE_DIR}/include     # 用于找到项目的所有头文件
+)
 
 # 8. 链接所有目标
 target_link_libraries(fiber_test PRIVATE raft-kv_lib)
 target_link_libraries(server PRIVATE raft-kv_lib)
 target_link_libraries(client PRIVATE raft-kv_lib)
+target_link_libraries(raft_test PRIVATE raft-kv_lib)
