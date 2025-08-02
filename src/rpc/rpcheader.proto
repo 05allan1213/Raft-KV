@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package RPC;
+
+// RPC头部消息
+// 用于在RPC调用中传递服务名、方法名和参数大小信息
+message RpcHeader
+{
+    bytes service_name = 1; // 服务名称，用于标识要调用的服务
+    bytes method_name = 2;  // 方法名称，用于标识要调用的具体方法
+    uint32 args_size = 3;   // 参数大小，用于标识后续参数数据的长度
+}
