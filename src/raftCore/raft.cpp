@@ -16,7 +16,8 @@
  */
 void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs *args, raftRpcProctoc::AppendEntriesReply *reply)
 {
-  std::lock_guard<std::mutex> locker(m_mtx);
+  // 使用细化的锁策略：先检查term（只需要读锁），然后根据需要获取写锁
+  // 这样可以提高并发性能，特别是在大量AppendEntries请求的情况下
   reply->set_appstate(AppNormal); // 能接收到代表网络是正常的
 
   // 第一步：检查任期号，这是Raft算法的核心安全保证
@@ -220,27 +221,6 @@ void Raft::applierTicker()
 bool Raft::CondInstallSnapshot(int lastIncludedTerm, int lastIncludedIndex, std::string snapshot)
 {
   return true;
-  //// Your code here (2D).
-  // rf.mu.Lock()
-  // defer rf.mu.Unlock()
-  // DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludedIndex {%v} to check
-  // whether snapshot is still valid in term %v", rf.me, lastIncludedTerm, lastIncludedIndex, rf.currentTerm)
-  //// outdated snapshot
-  // if lastIncludedIndex <= rf.commitIndex {
-  //	return false
-  // }
-  //
-  // lastLogIndex, _ := rf.getLastLogIndexAndTerm()
-  // if lastIncludedIndex > lastLogIndex {
-  //	rf.logs = make([]LogEntry, 0)
-  // } else {
-  //	rf.logs = rf.logs[rf.getSlicesIndexFromLogIndex(lastIncludedIndex)+1:]
-  // }
-  //// update dummy entry with lastIncludedTerm and lastIncludedIndex
-  // rf.lastApplied, rf.commitIndex = lastIncludedIndex, lastIncludedIndex
-  //
-  // rf.persister.Save(rf.persistData(), snapshot)
-  // return true
 }
 
 void Raft::doElection()
@@ -284,11 +264,20 @@ void Raft::doElection()
       requestVoteArgs->set_lastlogterm(lastLogTerm);
       auto requestVoteReply = std::make_shared<raftRpcProctoc::RequestVoteReply>();
 
-      // 使用匿名函数执行避免其拿到锁
-
-      std::thread t(&Raft::sendRequestVote, this, i, requestVoteArgs, requestVoteReply,
-                    votedNum); // 创建新线程并执行b函数，并传递参数
-      t.detach();
+      // 使用协程替代线程，提高并发性能
+      if (m_ioManager)
+      {
+        // 使用协程异步发送RequestVote RPC
+        m_ioManager->scheduler([this, i, requestVoteArgs, requestVoteReply, votedNum]()
+                               { this->sendRequestVote(i, requestVoteArgs, requestVoteReply, votedNum); });
+      }
+      else
+      {
+        // 回退到原有的线程模式（向后兼容）
+        std::thread t(&Raft::sendRequestVote, this, i, requestVoteArgs, requestVoteReply,
+                      votedNum);
+        t.detach();
+      }
     }
   }
 }
@@ -319,8 +308,17 @@ void Raft::doHeartBeat()
         //                        DPrintf("[func-ticker()-rf{%v}]rf.nextIndex[%v] {%v} <=
         //                        rf.lastSnapshotIncludeIndex{%v},so leaderSendSnapShot", rf.me, i, rf.nextIndex[i],
         //                        rf.lastSnapshotIncludeIndex)
-        std::thread t(&Raft::leaderSendSnapShot, this, i); // 创建新线程并执行b函数，并传递参数
-        t.detach();
+        // 使用协程替代线程发送快照
+        if (m_ioManager)
+        {
+          m_ioManager->scheduler([this, i]()
+                                 { this->leaderSendSnapShot(i); });
+        }
+        else
+        {
+          std::thread t(&Raft::leaderSendSnapShot, this, i);
+          t.detach();
+        }
         continue;
       }
       // 构造发送值
@@ -361,9 +359,18 @@ void Raft::doHeartBeat()
           std::make_shared<raftRpcProctoc::AppendEntriesReply>();
       appendEntriesReply->set_appstate(Disconnected);
 
-      std::thread t(&Raft::sendAppendEntries, this, i, appendEntriesArgs, appendEntriesReply,
-                    appendNums); // 创建新线程并执行b函数，并传递参数
-      t.detach();
+      // 使用协程替代线程发送AppendEntries
+      if (m_ioManager)
+      {
+        m_ioManager->scheduler([this, i, appendEntriesArgs, appendEntriesReply, appendNums]()
+                               { this->sendAppendEntries(i, appendEntriesArgs, appendEntriesReply, appendNums); });
+      }
+      else
+      {
+        std::thread t(&Raft::sendAppendEntries, this, i, appendEntriesArgs, appendEntriesReply,
+                      appendNums);
+        t.detach();
+      }
     }
     m_lastResetHearBeatTime = now(); // leader发送心跳，就不是随机时间了
   }
@@ -434,12 +441,34 @@ std::vector<ApplyMsg> Raft::getApplyLogs()
     myAssert(m_logs[getSlicesIndexFromLogIndex(m_lastApplied)].logindex() == m_lastApplied,
              format("rf.logs[rf.getSlicesIndexFromLogIndex(rf.lastApplied)].LogIndex{%d} != rf.lastApplied{%d} ",
                     m_logs[getSlicesIndexFromLogIndex(m_lastApplied)].logindex(), m_lastApplied));
-    ApplyMsg applyMsg;
-    applyMsg.CommandValid = true;
-    applyMsg.SnapshotValid = false;
-    applyMsg.Command = m_logs[getSlicesIndexFromLogIndex(m_lastApplied)].command();
-    applyMsg.CommandIndex = m_lastApplied;
-    applyMsgs.emplace_back(applyMsg);
+    const auto &logEntry = m_logs[getSlicesIndexFromLogIndex(m_lastApplied)];
+
+    // 检查是否为配置变更日志
+    if (logEntry.isconfigchange())
+    {
+      // 应用配置变更
+      applyConfigChange(logEntry.configchange());
+
+      // 配置变更日志也需要通知上层应用
+      ApplyMsg applyMsg;
+      applyMsg.CommandValid = true;
+      applyMsg.SnapshotValid = false;
+      applyMsg.Command = logEntry.command();
+      applyMsg.CommandIndex = m_lastApplied;
+      applyMsgs.emplace_back(applyMsg);
+
+      DPrintf("[getApplyLogs] Applied config change at index %d", m_lastApplied);
+    }
+    else
+    {
+      // 普通日志条目
+      ApplyMsg applyMsg;
+      applyMsg.CommandValid = true;
+      applyMsg.SnapshotValid = false;
+      applyMsg.Command = logEntry.command();
+      applyMsg.CommandIndex = m_lastApplied;
+      applyMsgs.emplace_back(applyMsg);
+    }
     //        DPrintf("[	applyLog func-rf{%v}	] apply Log,logIndex:%v  ，logTerm：{%v},command：{%v}\n",
     //        rf.me, rf.lastApplied, rf.logs[rf.getSlicesIndexFromLogIndex(rf.lastApplied)].LogTerm,
     //        rf.logs[rf.getSlicesIndexFromLogIndex(rf.lastApplied)].Command)
@@ -476,12 +505,8 @@ void Raft::getPrevLogInfo(int server, int *preIndex, int *preTerm)
 // believes it is the Leader.
 void Raft::GetState(int *term, bool *isLeader)
 {
-  m_mtx.lock();
-  DEFER
-  {
-    // todo 暂时不清楚会不会导致死锁
-    m_mtx.unlock();
-  };
+  // 使用读锁，因为这是读多写少的场景
+  monsoon::RWMutex::ReadLock lock(m_stateMutex);
 
   // Your code here (2A).
   *term = m_currentTerm;
@@ -944,8 +969,17 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
       m_nextIndex[i] = lastLogIndex + 1; // 有效下标从1开始，因此要+1
       m_matchIndex[i] = 0;               // 每换一个领导都是从0开始，见fig2
     }
-    std::thread t(&Raft::doHeartBeat, this); // 马上向其他节点宣告自己就是leader
-    t.detach();
+    // 马上向其他节点宣告自己就是leader - 使用协程替代线程
+    if (m_ioManager)
+    {
+      m_ioManager->scheduler([this]()
+                             { this->doHeartBeat(); });
+    }
+    else
+    {
+      std::thread t(&Raft::doHeartBeat, this);
+      t.detach();
+    }
 
     persist();
   }
@@ -1085,6 +1119,52 @@ void Raft::RequestVote(google::protobuf::RpcController *controller, const ::raft
                        ::raftRpcProctoc::RequestVoteReply *response, ::google::protobuf::Closure *done)
 {
   RequestVote(request, response);
+  done->Run();
+}
+
+void Raft::ChangeConfig(google::protobuf::RpcController *controller,
+                        const ::raftRpcProctoc::ChangeConfigArgs *request,
+                        ::raftRpcProctoc::ChangeConfigReply *response, ::google::protobuf::Closure *done)
+{
+  std::lock_guard<std::mutex> lock(m_mtx);
+
+  // 只有Leader可以处理成员变更请求
+  if (m_status != Leader)
+  {
+    response->set_success(false);
+    response->set_isleader(false);
+    response->set_error("Not leader");
+    done->Run();
+    return;
+  }
+
+  response->set_isleader(true);
+
+  // 创建配置变更日志条目
+  raftRpcProctoc::LogEntry configEntry = createConfigChangeEntry(
+      request->type(), request->nodeid(), request->address());
+
+  // 将配置变更作为日志条目添加到日志中
+  m_logs.emplace_back(configEntry);
+
+  // 立即开始复制这个配置变更日志
+  if (m_ioManager)
+  {
+    m_ioManager->scheduler([this]()
+                           { this->doHeartBeat(); });
+  }
+  else
+  {
+    std::thread t(&Raft::doHeartBeat, this);
+    t.detach();
+  }
+
+  response->set_success(true);
+  response->set_error("");
+
+  DPrintf("[ChangeConfig] Leader %d processed config change: type=%d, nodeId=%s, address=%s",
+          m_me, request->type(), request->nodeid().c_str(), request->address().c_str());
+
   done->Run();
 }
 
@@ -1278,4 +1358,165 @@ void Raft::Snapshot(int index, std::string snapshot)
   myAssert(m_logs.size() + m_lastSnapshotIncludeIndex == lastLogIndex,
            format("len(rf.logs){%d} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
                   m_lastSnapshotIncludeIndex, lastLogIndex));
+}
+
+// ==================== 成员变更相关方法实现 ====================
+
+bool Raft::AddNode(const std::string &nodeId, const std::string &address)
+{
+  std::lock_guard<std::mutex> lock(m_mtx);
+
+  if (m_status != Leader)
+  {
+    DPrintf("[AddNode] Node %d is not leader, cannot add node %s", m_me, nodeId.c_str());
+    return false;
+  }
+
+  // 检查节点是否已存在
+  if (m_nodeAddresses.find(nodeId) != m_nodeAddresses.end())
+  {
+    DPrintf("[AddNode] Node %s already exists", nodeId.c_str());
+    return false;
+  }
+
+  // 创建配置变更日志条目
+  raftRpcProctoc::LogEntry configEntry = createConfigChangeEntry(
+      raftRpcProctoc::ADD_NODE, nodeId, address);
+
+  // 添加到日志中
+  m_logs.emplace_back(configEntry);
+
+  DPrintf("[AddNode] Leader %d added config change log for adding node %s at %s",
+          m_me, nodeId.c_str(), address.c_str());
+
+  return true;
+}
+
+bool Raft::RemoveNode(const std::string &nodeId)
+{
+  std::lock_guard<std::mutex> lock(m_mtx);
+
+  if (m_status != Leader)
+  {
+    DPrintf("[RemoveNode] Node %d is not leader, cannot remove node %s", m_me, nodeId.c_str());
+    return false;
+  }
+
+  // 检查节点是否存在
+  if (m_nodeAddresses.find(nodeId) == m_nodeAddresses.end())
+  {
+    DPrintf("[RemoveNode] Node %s does not exist", nodeId.c_str());
+    return false;
+  }
+
+  // 创建配置变更日志条目
+  raftRpcProctoc::LogEntry configEntry = createConfigChangeEntry(
+      raftRpcProctoc::REMOVE_NODE, nodeId, "");
+
+  // 添加到日志中
+  m_logs.emplace_back(configEntry);
+
+  DPrintf("[RemoveNode] Leader %d added config change log for removing node %s",
+          m_me, nodeId.c_str());
+
+  return true;
+}
+
+raftRpcProctoc::LogEntry Raft::createConfigChangeEntry(raftRpcProctoc::ConfigChangeType type,
+                                                       const std::string &nodeId,
+                                                       const std::string &address)
+{
+  raftRpcProctoc::LogEntry entry;
+  entry.set_logterm(m_currentTerm);
+  entry.set_logindex(getNewCommandIndex());
+  entry.set_isconfigchange(true);
+
+  // 设置配置变更内容
+  raftRpcProctoc::ConfigChange *configChange = entry.mutable_configchange();
+  configChange->set_type(type);
+  configChange->set_nodeid(nodeId);
+  configChange->set_address(address);
+
+  // 将配置变更序列化为命令
+  std::string configData;
+  configChange->SerializeToString(&configData);
+  entry.set_command(configData);
+
+  return entry;
+}
+
+void Raft::applyConfigChange(const raftRpcProctoc::ConfigChange &configChange)
+{
+  std::lock_guard<std::mutex> lock(m_mtx);
+
+  const std::string &nodeId = configChange.nodeid();
+  const std::string &address = configChange.address();
+
+  if (configChange.type() == raftRpcProctoc::ADD_NODE)
+  {
+    // 添加节点
+    if (m_nodeAddresses.find(nodeId) == m_nodeAddresses.end())
+    {
+      m_nodeAddresses[nodeId] = address;
+
+      // 创建新的 RPC 连接
+      auto newPeer = std::make_shared<RaftRpcUtil>(address.substr(0, address.find(':')),
+                                                   std::stoi(address.substr(address.find(':') + 1)));
+      m_peers.push_back(newPeer);
+
+      // 更新索引映射
+      int newIndex = m_peers.size() - 1;
+      m_indexToNodeId[newIndex] = nodeId;
+      m_nodeIdToIndex[nodeId] = newIndex;
+
+      // 为新节点初始化 nextIndex 和 matchIndex
+      m_nextIndex.push_back(getLastLogIndex() + 1);
+      m_matchIndex.push_back(0);
+
+      DPrintf("[applyConfigChange] Added node %s at %s, new cluster size: %d",
+              nodeId.c_str(), address.c_str(), m_peers.size());
+    }
+  }
+  else if (configChange.type() == raftRpcProctoc::REMOVE_NODE)
+  {
+    // 移除节点
+    auto it = m_nodeIdToIndex.find(nodeId);
+    if (it != m_nodeIdToIndex.end())
+    {
+      int removeIndex = it->second;
+
+      // 移除 RPC 连接
+      m_peers.erase(m_peers.begin() + removeIndex);
+
+      // 移除索引映射
+      m_nodeAddresses.erase(nodeId);
+      m_indexToNodeId.erase(removeIndex);
+      m_nodeIdToIndex.erase(nodeId);
+
+      // 移除对应的 nextIndex 和 matchIndex
+      m_nextIndex.erase(m_nextIndex.begin() + removeIndex);
+      m_matchIndex.erase(m_matchIndex.begin() + removeIndex);
+
+      // 更新其他节点的索引映射
+      for (auto &pair : m_nodeIdToIndex)
+      {
+        if (pair.second > removeIndex)
+        {
+          pair.second--;
+          m_indexToNodeId[pair.second] = pair.first;
+        }
+      }
+      m_indexToNodeId.erase(m_indexToNodeId.upper_bound(removeIndex), m_indexToNodeId.end());
+
+      DPrintf("[applyConfigChange] Removed node %s, new cluster size: %d",
+              nodeId.c_str(), m_peers.size());
+
+      // 如果移除的是当前节点自己，需要停止服务
+      if (nodeId == std::to_string(m_me))
+      {
+        DPrintf("[applyConfigChange] Current node %d is being removed, shutting down", m_me);
+        // 这里可以设置一个标志来优雅关闭
+      }
+    }
+  }
 }

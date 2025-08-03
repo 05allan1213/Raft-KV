@@ -10,6 +10,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <map>
 #include "ApplyMsg.h"
 #include "Persister.h"
 #include "boost/any.hpp"
@@ -50,17 +52,33 @@ constexpr int Normal = 3; // 正常状态
 class Raft : public raftRpcProctoc::raftRpc
 {
 private:
-  std::mutex m_mtx;                                  // 互斥锁，保护共享数据
+  // 细化锁粒度 - 使用多个专门的锁替代单一大锁
+  mutable monsoon::RWMutex m_stateMutex; // 读写锁，保护状态相关数据（读多写少）
+  mutable std::mutex m_logMutex;         // 互斥锁，保护日志相关数据
+  mutable std::mutex m_leaderMutex;      // 互斥锁，保护leader状态数据
+
+  // 临时保留原有的大锁，用于逐步迁移
+  mutable std::mutex m_mtx; // 原有的大锁（逐步迁移中）
+
   std::vector<std::shared_ptr<RaftRpcUtil>> m_peers; // 集群中所有节点的RPC客户端
   std::shared_ptr<Persister> m_persister;            // 持久化存储对象
   int m_me;                                          // 当前节点的ID
-  int m_currentTerm;                                 // 当前任期号
-  int m_votedFor;                                    // 当前任期内投票给哪个候选者，-1表示未投票
-  std::vector<raftRpcProctoc::LogEntry> m_logs;      // 日志条目数组，包含状态机要执行的指令集和任期号
-  int m_commitIndex;                                 // 已知已提交的最高日志条目的索引
-  int m_lastApplied;                                 // 已经应用到状态机的最高日志条目的索引
 
-  // 这两个状态由服务器维护，易失性数据
+  // 成员变更相关
+  std::map<std::string, std::string> m_nodeAddresses; // 节点ID到地址的映射
+  std::map<int, std::string> m_indexToNodeId;         // 索引到节点ID的映射
+  std::map<std::string, int> m_nodeIdToIndex;         // 节点ID到索引的映射
+
+  // 状态变量（暂时使用普通变量，后续优化为原子操作）
+  int m_currentTerm; // 当前任期号
+  int m_votedFor;    // 当前任期内投票给哪个候选者，-1表示未投票
+  int m_commitIndex; // 已知已提交的最高日志条目的索引
+  int m_lastApplied; // 已经应用到状态机的最高日志条目的索引
+
+  // 需要锁保护的数据
+  std::vector<raftRpcProctoc::LogEntry> m_logs; // 日志条目数组，包含状态机要执行的指令集和任期号
+
+  // 这两个状态由服务器维护，易失性数据（leader专用）
   std::vector<int> m_nextIndex;  // 对于每个服务器，发送到该服务器的下一个日志条目的索引
   std::vector<int> m_matchIndex; // 对于每个服务器，已知的已在该服务器上复制的最高日志条目的索引
 
@@ -350,6 +368,12 @@ public:
   void RequestVote(google::protobuf::RpcController *controller, const ::raftRpcProctoc::RequestVoteArgs *request,
                    ::raftRpcProctoc::RequestVoteReply *response, ::google::protobuf::Closure *done) override;
 
+  /**
+   * @brief RPC接口：处理成员变更请求
+   */
+  void ChangeConfig(google::protobuf::RpcController *controller, const ::raftRpcProctoc::ChangeConfigArgs *request,
+                    ::raftRpcProctoc::ChangeConfigReply *response, ::google::protobuf::Closure *done) override;
+
 public:
   /**
    * @brief 初始化Raft节点
@@ -360,6 +384,39 @@ public:
    */
   void init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
             std::shared_ptr<LockQueue<ApplyMsg>> applyCh);
+
+  /**
+   * @brief 添加节点到集群
+   * @param nodeId 节点ID
+   * @param address 节点地址
+   * @return 是否成功
+   */
+  bool AddNode(const std::string &nodeId, const std::string &address);
+
+  /**
+   * @brief 从集群中移除节点
+   * @param nodeId 节点ID
+   * @return 是否成功
+   */
+  bool RemoveNode(const std::string &nodeId);
+
+private:
+  /**
+   * @brief 处理成员变更日志条目
+   * @param configChange 配置变更内容
+   */
+  void applyConfigChange(const raftRpcProctoc::ConfigChange &configChange);
+
+  /**
+   * @brief 创建成员变更日志条目
+   * @param type 变更类型
+   * @param nodeId 节点ID
+   * @param address 节点地址
+   * @return 日志条目
+   */
+  raftRpcProctoc::LogEntry createConfigChangeEntry(raftRpcProctoc::ConfigChangeType type,
+                                                   const std::string &nodeId,
+                                                   const std::string &address);
 
 private:
   /**

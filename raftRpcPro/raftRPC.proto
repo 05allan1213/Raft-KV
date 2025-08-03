@@ -5,11 +5,28 @@ package raftRpcProctoc; //所在的命名空间
 
 option cc_generic_services = true;  //开启stub服务
 
+// 成员变更类型枚举
+enum ConfigChangeType {
+    ADD_NODE = 0;     // 添加节点
+    REMOVE_NODE = 1;  // 移除节点
+}
+
+// 成员变更配置
+message ConfigChange {
+    ConfigChangeType Type = 1;  // 变更类型
+    string NodeId = 2;          // 节点ID
+    string Address = 3;         // 节点地址 (ip:port)
+}
+
 // 日志实体
 message LogEntry{
     bytes Command  =1;
 	int32 LogTerm   =2;
 	int32 LogIndex  = 3;
+
+	// 成员变更相关字段
+	bool IsConfigChange = 4;        // 是否为配置变更日志
+	ConfigChange ConfigChange = 5;  // 配置变更内容
 }
 // AppendEntriesArgs 由leader复制log条目，也可以当做是心跳连接，注释中的rf为leader节点
 message AppendEntriesArgs  {
@@ -60,12 +77,27 @@ message InstallSnapshotRequest  {
 message InstallSnapshotResponse  {
 	int32 Term  = 1;
 }
+// 成员变更请求
+message ChangeConfigArgs {
+    ConfigChangeType Type = 1;  // 变更类型
+    string NodeId = 2;          // 节点ID
+    string Address = 3;         // 节点地址
+}
+
+// 成员变更响应
+message ChangeConfigReply {
+    bool Success = 1;           // 是否成功
+    string Error = 2;           // 错误信息
+    bool IsLeader = 3;          // 当前节点是否为Leader
+}
+
 //只有raft节点之间才会涉及rpc通信
-service raftRpc  
+service raftRpc
 {
     rpc AppendEntries(AppendEntriesArgs) returns(AppendEntriesReply);
     rpc InstallSnapshot (InstallSnapshotRequest) returns (InstallSnapshotResponse);
     rpc RequestVote (RequestVoteArgs) returns (RequestVoteReply);
+    rpc ChangeConfig (ChangeConfigArgs) returns (ChangeConfigReply);  // 成员变更RPC
 }
 // message ResultCode
 // {

@@ -527,10 +527,6 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   m_raftNode->init(servers, m_me, persister, applyChan);
   // kv的server直接与raft通信，但kv不直接与raft通信，所以需要把ApplyMsg的chan传递下去用于通信，两者的persist也是共用的
 
-  //////////////////////////////////
-
-  // You may need initialization code here.
-  // m_kvDB; //kvdb初始化
   m_skipList;
   waitApplyCh;
   m_lastRequestId;
@@ -541,5 +537,5 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
     ReadSnapShotToInstall(snapshot);
   }
   std::thread t2(&KvServer::ReadRaftApplyCommandLoop, this); // 马上向其他节点宣告自己就是leader
-  t2.join();                                                 // 由於ReadRaftApplyCommandLoop一直不會結束，达到一直卡在这的目的
+  t2.join();                                                 // 由于ReadRaftApplyCommandLoop一直不会結束，达到一直卡在这的目的
 }
