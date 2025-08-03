@@ -27,28 +27,52 @@ bool RaftRpcUtil::RequestVote(raftRpcProctoc::RequestVoteArgs *args, raftRpcProc
   return !controller.Failed();
 }
 
-// 异步RPC实现 - 在协程中执行同步调用，避免阻塞主线程
+// 异步RPC实现 - 使用真正的异步接口
 void RaftRpcUtil::AppendEntriesAsync(raftRpcProctoc::AppendEntriesArgs *args,
                                      raftRpcProctoc::AppendEntriesReply *response,
                                      AppendEntriesCallback callback)
 {
-  // 获取当前IOManager，在协程中执行RPC调用
-  auto ioManager = monsoon::IOManager::GetThis();
-  if (ioManager)
+  // 获取底层的MprpcChannel
+  MprpcChannel *channel = dynamic_cast<MprpcChannel *>(stub_->channel());
+  if (channel)
   {
-    ioManager->scheduler([this, args, response, callback]()
-                         {
-      bool success = this->AppendEntries(args, response);
-      callback(success, response); });
+    // 使用真正的异步接口
+    MprpcController controller;
+
+    // 获取方法描述符
+    const google::protobuf::ServiceDescriptor *service_desc =
+        raftRpcProctoc::raftRpc::descriptor();
+    const google::protobuf::MethodDescriptor *method_desc =
+        service_desc->FindMethodByName("AppendEntries");
+
+    // 调用异步接口
+    channel->CallMethodAsync(method_desc, &controller, args, response,
+                             [callback](bool success, google::protobuf::Message *msg)
+                             {
+                               auto *reply = dynamic_cast<raftRpcProctoc::AppendEntriesReply *>(msg);
+                               callback(success, reply);
+                             });
   }
   else
   {
-    // 如果没有IOManager，回退到线程模式
-    std::thread([this, args, response, callback]()
-                {
-      bool success = this->AppendEntries(args, response);
-      callback(success, response); })
-        .detach();
+    // 回退到原有的协程模式
+    auto ioManager = monsoon::IOManager::GetThis();
+    if (ioManager)
+    {
+      ioManager->scheduler([this, args, response, callback]()
+                           {
+        bool success = this->AppendEntries(args, response);
+        callback(success, response); });
+    }
+    else
+    {
+      // 如果没有IOManager，回退到线程模式
+      std::thread([this, args, response, callback]()
+                  {
+        bool success = this->AppendEntries(args, response);
+        callback(success, response); })
+          .detach();
+    }
   }
 }
 
@@ -56,21 +80,46 @@ void RaftRpcUtil::RequestVoteAsync(raftRpcProctoc::RequestVoteArgs *args,
                                    raftRpcProctoc::RequestVoteReply *response,
                                    RequestVoteCallback callback)
 {
-  auto ioManager = monsoon::IOManager::GetThis();
-  if (ioManager)
+  // 获取底层的MprpcChannel
+  MprpcChannel *channel = dynamic_cast<MprpcChannel *>(stub_->channel());
+  if (channel)
   {
-    ioManager->scheduler([this, args, response, callback]()
-                         {
-      bool success = this->RequestVote(args, response);
-      callback(success, response); });
+    // 使用真正的异步接口
+    MprpcController controller;
+
+    // 获取方法描述符
+    const google::protobuf::ServiceDescriptor *service_desc =
+        raftRpcProctoc::raftRpc::descriptor();
+    const google::protobuf::MethodDescriptor *method_desc =
+        service_desc->FindMethodByName("RequestVote");
+
+    // 调用异步接口
+    channel->CallMethodAsync(method_desc, &controller, args, response,
+                             [callback](bool success, google::protobuf::Message *msg)
+                             {
+                               auto *reply = dynamic_cast<raftRpcProctoc::RequestVoteReply *>(msg);
+                               callback(success, reply);
+                             });
   }
   else
   {
-    std::thread([this, args, response, callback]()
-                {
-      bool success = this->RequestVote(args, response);
-      callback(success, response); })
-        .detach();
+    // 回退到原有的协程模式
+    auto ioManager = monsoon::IOManager::GetThis();
+    if (ioManager)
+    {
+      ioManager->scheduler([this, args, response, callback]()
+                           {
+        bool success = this->RequestVote(args, response);
+        callback(success, response); });
+    }
+    else
+    {
+      std::thread([this, args, response, callback]()
+                  {
+        bool success = this->RequestVote(args, response);
+        callback(success, response); })
+          .detach();
+    }
   }
 }
 
@@ -78,21 +127,46 @@ void RaftRpcUtil::InstallSnapshotAsync(raftRpcProctoc::InstallSnapshotRequest *a
                                        raftRpcProctoc::InstallSnapshotResponse *response,
                                        InstallSnapshotCallback callback)
 {
-  auto ioManager = monsoon::IOManager::GetThis();
-  if (ioManager)
+  // 获取底层的MprpcChannel
+  MprpcChannel *channel = dynamic_cast<MprpcChannel *>(stub_->channel());
+  if (channel)
   {
-    ioManager->scheduler([this, args, response, callback]()
-                         {
-      bool success = this->InstallSnapshot(args, response);
-      callback(success, response); });
+    // 使用真正的异步接口
+    MprpcController controller;
+
+    // 获取方法描述符
+    const google::protobuf::ServiceDescriptor *service_desc =
+        raftRpcProctoc::raftRpc::descriptor();
+    const google::protobuf::MethodDescriptor *method_desc =
+        service_desc->FindMethodByName("InstallSnapshot");
+
+    // 调用异步接口
+    channel->CallMethodAsync(method_desc, &controller, args, response,
+                             [callback](bool success, google::protobuf::Message *msg)
+                             {
+                               auto *reply = dynamic_cast<raftRpcProctoc::InstallSnapshotResponse *>(msg);
+                               callback(success, reply);
+                             });
   }
   else
   {
-    std::thread([this, args, response, callback]()
-                {
-      bool success = this->InstallSnapshot(args, response);
-      callback(success, response); })
-        .detach();
+    // 回退到原有的协程模式
+    auto ioManager = monsoon::IOManager::GetThis();
+    if (ioManager)
+    {
+      ioManager->scheduler([this, args, response, callback]()
+                           {
+        bool success = this->InstallSnapshot(args, response);
+        callback(success, response); });
+    }
+    else
+    {
+      std::thread([this, args, response, callback]()
+                  {
+        bool success = this->InstallSnapshot(args, response);
+        callback(success, response); })
+          .detach();
+    }
   }
 }
 

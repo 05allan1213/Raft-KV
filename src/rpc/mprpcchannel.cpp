@@ -8,6 +8,7 @@
 #include "mprpccontroller.h"
 #include "rpcheader.pb.h"
 #include "util.h"
+#include "raft-kv/fiber/iomanager.h"
 
 /**
  * @brief RPC方法调用接口实现
@@ -63,7 +64,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   }
 
   // 构建RPC头部信息
-  RPC::RpcHeader rpcHeader;
+  mprpc::RpcHeader rpcHeader;
   rpcHeader.set_service_name(service_name);
   rpcHeader.set_method_name(method_name);
   rpcHeader.set_args_size(args_size);
@@ -193,8 +194,17 @@ bool MprpcChannel::newConnect(const char *ip, uint16_t port, string *errMsg)
  * 使用tcp编程，完成rpc方法的远程调用，使用的是短连接，因此每次都要重新连接上去，待改成长连接。
  * 没有连接或者连接已经断开，那么就要重新连接呢,会一直不断地重试
  */
-MprpcChannel::MprpcChannel(string ip, short port, bool connectNow) : m_ip(ip), m_port(port), m_clientFd(-1)
+MprpcChannel::MprpcChannel(string ip, short port, bool connectNow)
+    : m_ip(ip), m_port(port), m_clientFd(-1), m_ioManager(nullptr), m_isAsyncMode(false)
 {
+  // 尝试获取当前的IOManager
+  m_ioManager = monsoon::IOManager::GetThis();
+  if (m_ioManager)
+  {
+    m_isAsyncMode = true;
+    DPrintf("[MprpcChannel] 检测到IOManager，启用异步模式");
+  }
+
   // 读取配置文件rpcserver的信息
   // std::string ip = MprpcApplication::GetInstance().GetConfig().Load("rpcserverip");
   // uint16_t port = atoi(MprpcApplication::GetInstance().GetConfig().Load("rpcserverport").c_str());
@@ -213,5 +223,361 @@ MprpcChannel::MprpcChannel(string ip, short port, bool connectNow) : m_ip(ip), m
   {
     std::cout << errMsg << std::endl;
     rt = newConnect(ip.c_str(), port, &errMsg);
+  }
+}
+
+/**
+ * @brief 异步RPC方法调用接口（回调风格）
+ */
+void MprpcChannel::CallMethodAsync(const google::protobuf::MethodDescriptor *method,
+                                   google::protobuf::RpcController *controller,
+                                   const google::protobuf::Message *request,
+                                   google::protobuf::Message *response,
+                                   std::function<void(bool, google::protobuf::Message *)> callback)
+{
+  if (!m_isAsyncMode || !m_ioManager)
+  {
+    // 如果不在异步模式下，回退到同步调用
+    DPrintf("[MprpcChannel::CallMethodAsync] 不在异步模式，回退到同步调用");
+    CallMethod(method, controller, request, response, nullptr);
+    callback(!controller->Failed(), response);
+    return;
+  }
+
+  // 创建异步请求上下文
+  auto context = std::make_shared<AsyncRpcContext>(generateRequestId());
+  context->callback = callback;
+  context->response.reset(response->New());
+
+  // 发送异步请求
+  if (!sendAsyncRequest(method, controller, request, context))
+  {
+    // 发送失败，直接调用回调
+    controller->SetFailed("Failed to send async request");
+    callback(false, nullptr);
+    return;
+  }
+
+  // 将请求添加到待处理列表
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingRequests[context->requestId] = context;
+  }
+}
+
+/**
+ * @brief 异步RPC方法调用接口（Future风格）
+ */
+std::future<std::unique_ptr<google::protobuf::Message>> MprpcChannel::CallMethodAsync(
+    const google::protobuf::MethodDescriptor *method,
+    google::protobuf::RpcController *controller,
+    const google::protobuf::Message *request,
+    const google::protobuf::Message *response)
+{
+  auto promise = std::make_shared<std::promise<std::unique_ptr<google::protobuf::Message>>>();
+  auto future = promise->get_future();
+
+  if (!m_isAsyncMode || !m_ioManager)
+  {
+    // 如果不在异步模式下，回退到同步调用
+    DPrintf("[MprpcChannel::CallMethodAsync] 不在异步模式，回退到同步调用");
+    auto responsePtr = std::unique_ptr<google::protobuf::Message>(response->New());
+    CallMethod(method, controller, request, responsePtr.get(), nullptr);
+
+    if (controller->Failed())
+    {
+      promise->set_value(nullptr);
+    }
+    else
+    {
+      promise->set_value(std::move(responsePtr));
+    }
+    return future;
+  }
+
+  // 创建异步请求上下文
+  auto context = std::make_shared<AsyncRpcContext>(generateRequestId());
+  context->promise = promise;
+  context->response.reset(response->New());
+
+  // 发送异步请求
+  if (!sendAsyncRequest(method, controller, request, context))
+  {
+    // 发送失败，设置promise为nullptr
+    promise->set_value(nullptr);
+    return future;
+  }
+
+  // 将请求添加到待处理列表
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    m_pendingRequests[context->requestId] = context;
+  }
+
+  return future;
+}
+
+/**
+ * @brief 异步发送RPC请求的核心实现
+ */
+bool MprpcChannel::sendAsyncRequest(const google::protobuf::MethodDescriptor *method,
+                                    google::protobuf::RpcController *controller,
+                                    const google::protobuf::Message *request,
+                                    std::shared_ptr<AsyncRpcContext> context)
+{
+  // 检查连接状态，如果未连接则尝试建立连接
+  if (m_clientFd == -1)
+  {
+    std::string errMsg;
+    bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
+    if (!rt)
+    {
+      DPrintf("[func-MprpcChannel::sendAsyncRequest]重连接ip：{%s} port{%d}失败", m_ip.c_str(), m_port);
+      controller->SetFailed(errMsg);
+      return false;
+    }
+    else
+    {
+      DPrintf("[func-MprpcChannel::sendAsyncRequest]连接ip：{%s} port{%d}成功", m_ip.c_str(), m_port);
+    }
+  }
+
+  // 获取服务和方法信息
+  const google::protobuf::ServiceDescriptor *sd = method->service();
+  std::string service_name = sd->name();    // 服务名称
+  std::string method_name = method->name(); // 方法名称
+
+  // 序列化请求参数
+  uint32_t args_size{}; // 参数大小
+  std::string args_str; // 序列化后的参数字符串
+  if (request->SerializeToString(&args_str))
+  {
+    args_size = args_str.size();
+  }
+  else
+  {
+    controller->SetFailed("serialize request error!");
+    return false;
+  }
+
+  // 定义rpc的请求header
+  mprpc::RpcHeader rpcHeader;
+  rpcHeader.set_service_name(service_name);
+  rpcHeader.set_method_name(method_name);
+  rpcHeader.set_args_size(args_size);
+  rpcHeader.set_request_id(context->requestId); // 设置请求ID
+
+  uint32_t header_size{};
+  std::string rpc_header_str;
+  if (rpcHeader.SerializeToString(&rpc_header_str))
+  {
+    header_size = rpc_header_str.size();
+  }
+  else
+  {
+    controller->SetFailed("serialize rpc header error!");
+    return false;
+  }
+
+  // 使用protobuf的CodedOutputStream来构建发送的数据流
+  std::string send_rpc_str; // 用来存储最终发送的数据
+  {
+    // 创建一个StringOutputStream用于写入send_rpc_str
+    google::protobuf::io::StringOutputStream string_output(&send_rpc_str);
+    google::protobuf::io::CodedOutputStream coded_output(&string_output);
+
+    // 先写入header的长度（变长编码）
+    coded_output.WriteVarint32(static_cast<uint32_t>(rpc_header_str.size()));
+
+    // 然后写入rpc_header本身
+    coded_output.WriteString(rpc_header_str);
+  }
+
+  // 最后，将请求参数附加到send_rpc_str后面
+  send_rpc_str += args_str;
+
+  // 发送rpc请求（非阻塞）
+  ssize_t sent = send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), MSG_DONTWAIT);
+  if (sent == -1)
+  {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+    {
+      // 发送缓冲区满，需要等待
+      DPrintf("[MprpcChannel::sendAsyncRequest] 发送缓冲区满，需要等待");
+      // TODO: 这里可以注册WRITE事件等待发送完成
+      return false;
+    }
+    else
+    {
+      // 其他错误，尝试重连
+      DPrintf("[MprpcChannel::sendAsyncRequest] 发送失败，尝试重连");
+      close(m_clientFd);
+      m_clientFd = -1;
+      std::string errMsg;
+      bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
+      if (!rt)
+      {
+        controller->SetFailed(errMsg);
+        return false;
+      }
+      // 重连成功后重新发送
+      sent = send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), 0);
+      if (sent == -1)
+      {
+        controller->SetFailed("send error after reconnect");
+        return false;
+      }
+    }
+  }
+
+  // 注册READ事件，等待响应
+  if (m_ioManager->addEvent(m_clientFd, monsoon::READ,
+                            [this]()
+                            { this->handleAsyncResponse(); }) != 0)
+  {
+    DPrintf("[MprpcChannel::sendAsyncRequest] 注册READ事件失败");
+    return false;
+  }
+
+  DPrintf("[MprpcChannel::sendAsyncRequest] 异步请求发送成功，requestId: %lu", context->requestId);
+  return true;
+}
+
+/**
+ * @brief 处理异步响应的回调函数
+ */
+void MprpcChannel::handleAsyncResponse()
+{
+  // 接收响应数据
+  char recv_buf[4096] = {0}; // 增大接收缓冲区
+  int recv_size = 0;
+  if (-1 == (recv_size = recv(m_clientFd, recv_buf, sizeof(recv_buf), MSG_DONTWAIT)))
+  {
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+    {
+      // 没有数据可读，重新注册READ事件
+      m_ioManager->addEvent(m_clientFd, monsoon::READ,
+                            [this]()
+                            { this->handleAsyncResponse(); });
+      return;
+    }
+    else
+    {
+      // 连接错误，处理所有待处理的请求
+      DPrintf("[MprpcChannel::handleAsyncResponse] recv error! errno:%d", errno);
+      close(m_clientFd);
+      m_clientFd = -1;
+
+      // 通知所有待处理的请求失败
+      std::lock_guard<std::mutex> lock(m_pendingMutex);
+      for (auto &pair : m_pendingRequests)
+      {
+        auto &context = pair.second;
+        if (context->callback)
+        {
+          context->callback(false, nullptr);
+        }
+        if (context->promise)
+        {
+          context->promise->set_value(nullptr);
+        }
+      }
+      m_pendingRequests.clear();
+      return;
+    }
+  }
+
+  if (recv_size == 0)
+  {
+    // 连接被对方关闭
+    DPrintf("[MprpcChannel::handleAsyncResponse] 连接被对方关闭");
+    close(m_clientFd);
+    m_clientFd = -1;
+
+    // 通知所有待处理的请求失败
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    for (auto &pair : m_pendingRequests)
+    {
+      auto &context = pair.second;
+      if (context->callback)
+      {
+        context->callback(false, nullptr);
+      }
+      if (context->promise)
+      {
+        context->promise->set_value(nullptr);
+      }
+    }
+    m_pendingRequests.clear();
+    return;
+  }
+
+  // 解析响应数据
+  // 简化版本：假设一次recv就能收到完整的响应
+  // 实际应用中可能需要处理分包情况
+
+  // 这里需要根据协议解析出requestId
+  // 由于当前协议没有在响应中包含requestId，我们假设响应是按顺序返回的
+  // 在实际实现中，应该修改协议在响应中包含requestId
+
+  std::shared_ptr<AsyncRpcContext> context;
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (!m_pendingRequests.empty())
+    {
+      // 简化处理：取第一个待处理的请求
+      auto it = m_pendingRequests.begin();
+      context = it->second;
+      m_pendingRequests.erase(it);
+    }
+  }
+
+  if (!context)
+  {
+    DPrintf("[MprpcChannel::handleAsyncResponse] 没有找到对应的请求上下文");
+    // 重新注册READ事件，继续等待其他响应
+    m_ioManager->addEvent(m_clientFd, monsoon::READ,
+                          [this]()
+                          { this->handleAsyncResponse(); });
+    return;
+  }
+
+  // 反序列化响应数据
+  if (!context->response->ParseFromArray(recv_buf, recv_size))
+  {
+    DPrintf("[MprpcChannel::handleAsyncResponse] 解析响应失败");
+    // 通知请求失败
+    if (context->callback)
+    {
+      context->callback(false, nullptr);
+    }
+    if (context->promise)
+    {
+      context->promise->set_value(nullptr);
+    }
+  }
+  else
+  {
+    // 解析成功，通知请求完成
+    DPrintf("[MprpcChannel::handleAsyncResponse] 异步请求完成，requestId: %lu", context->requestId);
+    if (context->callback)
+    {
+      context->callback(true, context->response.get());
+    }
+    if (context->promise)
+    {
+      context->promise->set_value(std::move(context->response));
+    }
+  }
+
+  // 检查是否还有待处理的请求，如果有则继续注册READ事件
+  {
+    std::lock_guard<std::mutex> lock(m_pendingMutex);
+    if (!m_pendingRequests.empty())
+    {
+      m_ioManager->addEvent(m_clientFd, monsoon::READ,
+                            [this]()
+                            { this->handleAsyncResponse(); });
+    }
   }
 }
