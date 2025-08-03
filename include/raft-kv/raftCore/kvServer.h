@@ -14,7 +14,10 @@
 #include <mutex>
 #include <unordered_map>
 #include <memory>
+#include <atomic>
+#include <chrono>
 #include "kvServerRPC.pb.h"
+#include "raft-kv/common/promise_future.h"
 #include "raft-kv/raftCore/raft.h"
 #include "raft-kv/skipList/skipList.h"
 
@@ -144,6 +147,28 @@ public:
   bool SendMessageToWaitChan(const Op &op, int raftIndex);
 
   /**
+   * @brief 优化版本：使用 Promise/Future 等待 Raft 提交
+   * @param op 操作对象
+   * @param raftIndex Raft索引
+   * @param timeoutMs 超时时间（毫秒）
+   * @param result 结果输出参数
+   * @return 是否成功获取结果
+   */
+  bool WaitForRaftCommitOptimized(const Op &op, int raftIndex, int timeoutMs, Op *result);
+
+  /**
+   * @brief 设置等待机制模式
+   * @param usePromiseFuture 是否使用 Promise/Future 模式
+   */
+  void SetWaitMode(bool usePromiseFuture);
+
+  /**
+   * @brief 更新 Raft 状态大小缓存
+   * @param newSize 新的大小
+   */
+  void UpdateRaftStateSize(size_t newSize);
+
+  /**
    * @brief 检查是否需要制作快照
    * @param raftIndex Raft索引
    * @param proportion 比例
@@ -233,10 +258,16 @@ private:
   SkipList<std::string, std::string> m_skipList;       // 跳表，用于存储键值对
   std::unordered_map<std::string, std::string> m_kvDB; // 哈希表，用于存储键值对
 
-  std::unordered_map<int, LockQueue<Op> *> waitApplyCh; // index(raft) -> chan，等待应用的操作通道映射
+  // 等待机制优化：支持两种模式
+  std::unordered_map<int, LockQueue<Op> *> waitApplyCh; // 原有的 LockQueue 模式（向后兼容）
+  PromiseFutureManager<Op> promiseManager_;             // 新的 Promise/Future 模式
+  LockQueuePool<Op> lockQueuePool_;                     // LockQueue 对象池
+  bool usePromiseFuture_;                               // 是否使用 Promise/Future 模式
 
   std::unordered_map<std::string, int> m_lastRequestId; // clientid -> requestID，一个kV服务器可能连接多个client
 
-  // 快照相关
-  int m_lastSnapShotRaftLogIndex; // 最后一个快照点的Raft日志索引
+  // 快照相关优化
+  int m_lastSnapShotRaftLogIndex;                           // 最后一个快照点的Raft日志索引
+  std::atomic<size_t> m_raftStateSize;                      // 缓存的 Raft 状态大小，避免频繁读文件
+  std::chrono::steady_clock::time_point m_lastSnapshotTime; // 上次快照时间
 };

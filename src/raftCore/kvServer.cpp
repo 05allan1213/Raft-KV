@@ -134,21 +134,11 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetR
     return;
   }
 
-  // create waitForCh
-  m_mtx.lock();
-
-  if (waitApplyCh.find(raftIndex) == waitApplyCh.end())
-  {
-    waitApplyCh.insert(std::make_pair(raftIndex, new LockQueue<Op>()));
-  }
-  auto chForRaftIndex = waitApplyCh[raftIndex];
-
-  m_mtx.unlock(); // 直接解锁，等待任务执行完成，不能一直拿锁等待
-
-  // timeout
+  // 使用优化的等待机制
   Op raftCommitOp;
+  bool waitSuccess = WaitForRaftCommitOptimized(op, raftIndex, CONSENSUS_TIMEOUT, &raftCommitOp);
 
-  if (!chForRaftIndex->timeOutPop(CONSENSUS_TIMEOUT, &raftCommitOp))
+  if (!waitSuccess)
   {
     //        DPrintf("[GET TIMEOUT!!!]From Client %d (Request %d) To Server %d, key %v, raftIndex %d", args.ClientId,
     //        args.RequestId, kv.me, op.Key, raftIndex)
@@ -210,11 +200,7 @@ void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetR
       //            == op.RequestId{%v}", raftCommitOp.ClientId, op.ClientId, raftCommitOp.RequestId, op.RequestId)
     }
   }
-  m_mtx.lock(); // todo 這個可以先弄一個defer，因爲刪除優先級並不高，先把rpc發回去更加重要
-  auto tmp = waitApplyCh[raftIndex];
-  waitApplyCh.erase(raftIndex);
-  delete tmp;
-  m_mtx.unlock();
+  // 新的等待机制会自动清理，无需手动删除
 }
 
 void KvServer::GetCommandFromRaft(ApplyMsg message)
@@ -299,19 +285,11 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs *args, raftKVRpcP
       "[func -KvServer::PutAppend -kvserver{%d}]From Client %s (Request %d) To Server %d, key %s, raftIndex %d , is "
       "leader ",
       m_me, &args->clientid(), args->requestid(), m_me, &op.Key, raftIndex);
-  m_mtx.lock();
-  if (waitApplyCh.find(raftIndex) == waitApplyCh.end())
-  {
-    waitApplyCh.insert(std::make_pair(raftIndex, new LockQueue<Op>()));
-  }
-  auto chForRaftIndex = waitApplyCh[raftIndex];
-
-  m_mtx.unlock(); // 直接解锁，等待任务执行完成，不能一直拿锁等待
-
-  // timeout
+  // 使用优化的等待机制
   Op raftCommitOp;
+  bool waitSuccess = WaitForRaftCommitOptimized(op, raftIndex, CONSENSUS_TIMEOUT, &raftCommitOp);
 
-  if (!chForRaftIndex->timeOutPop(CONSENSUS_TIMEOUT, &raftCommitOp))
+  if (!waitSuccess)
   {
     DPrintf(
         "[func -KvServer::PutAppend -kvserver{%d}]TIMEOUT PUTAPPEND !!!! Server %d , get Command <-- Index:%d , "
@@ -343,13 +321,7 @@ void KvServer::PutAppend(const raftKVRpcProctoc::PutAppendArgs *args, raftKVRpcP
       reply->set_err(ErrWrongLeader);
     }
   }
-
-  m_mtx.lock();
-
-  auto tmp = waitApplyCh[raftIndex];
-  waitApplyCh.erase(raftIndex);
-  delete tmp;
-  m_mtx.unlock();
+  // 新的等待机制会自动清理，无需手动删除
 }
 
 void KvServer::ReadRaftApplyCommandLoop()
@@ -403,22 +375,37 @@ void KvServer::ReadSnapShotToInstall(std::string snapshot)
 
 bool KvServer::SendMessageToWaitChan(const Op &op, int raftIndex)
 {
-  std::lock_guard<std::mutex> lg(m_mtx);
   DPrintf(
       "[RaftApplyMessageSendToWaitChan--> raftserver{%d}] , Send Command --> Index:{%d} , ClientId {%d}, RequestId "
       "{%d}, Opreation {%v}, Key :{%v}, Value :{%v}",
       m_me, raftIndex, &op.ClientId, op.RequestId, &op.Operation, &op.Key, &op.Value);
 
-  if (waitApplyCh.find(raftIndex) == waitApplyCh.end())
+  if (usePromiseFuture_)
   {
-    return false;
+    // 使用 Promise/Future 模式
+    bool success = promiseManager_.setResult(raftIndex, op);
+    if (success)
+    {
+      DPrintf("[SendMessageToWaitChan] Promise/Future mode: Successfully set result for index %d", raftIndex);
+    }
+    return success;
   }
-  waitApplyCh[raftIndex]->Push(op);
-  DPrintf(
-      "[RaftApplyMessageSendToWaitChan--> raftserver{%d}] , Send Command --> Index:{%d} , ClientId {%d}, RequestId "
-      "{%d}, Opreation {%v}, Key :{%v}, Value :{%v}",
-      m_me, raftIndex, &op.ClientId, op.RequestId, &op.Operation, &op.Key, &op.Value);
-  return true;
+  else
+  {
+    // 使用原有的 LockQueue 模式
+    std::lock_guard<std::mutex> lg(m_mtx);
+
+    if (waitApplyCh.find(raftIndex) == waitApplyCh.end())
+    {
+      return false;
+    }
+    waitApplyCh[raftIndex]->Push(op);
+    DPrintf(
+        "[RaftApplyMessageSendToWaitChan--> raftserver{%d}] , Send Command --> Index:{%d} , ClientId {%d}, RequestId "
+        "{%d}, Opreation {%v}, Key :{%v}, Value :{%v}",
+        m_me, raftIndex, &op.ClientId, op.RequestId, &op.Operation, &op.Key, &op.Value);
+    return true;
+  }
 }
 
 void KvServer::IfNeedToSendSnapShotCommand(int raftIndex, int proportion)
@@ -469,6 +456,11 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
 
   m_me = me;
   m_maxRaftState = maxraftstate;
+
+  // 初始化优化相关变量
+  usePromiseFuture_ = true; // 默认使用优化的 Promise/Future 模式
+  m_raftStateSize.store(0);
+  m_lastSnapshotTime = std::chrono::steady_clock::now();
 
   applyChan = std::make_shared<LockQueue<ApplyMsg>>();
 
@@ -538,4 +530,74 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   }
   std::thread t2(&KvServer::ReadRaftApplyCommandLoop, this); // 马上向其他节点宣告自己就是leader
   t2.join();                                                 // 由于ReadRaftApplyCommandLoop一直不会結束，达到一直卡在这的目的
+}
+
+// ==================== 等待机制优化实现 ====================
+
+bool KvServer::WaitForRaftCommitOptimized(const Op &op, int raftIndex, int timeoutMs, Op *result)
+{
+  if (usePromiseFuture_)
+  {
+    // 使用 Promise/Future 模式
+    auto handle = promiseManager_.createWaitHandle(raftIndex);
+
+    // 等待结果
+    bool success = promiseManager_.waitForResult(handle, timeoutMs, result);
+
+    if (!success)
+    {
+      // 超时或失败，清理等待句柄
+      promiseManager_.removeWaitHandle(raftIndex);
+    }
+
+    return success;
+  }
+  else
+  {
+    // 回退到原有的 LockQueue 模式（使用对象池优化）
+    m_mtx.lock();
+
+    std::shared_ptr<LockQueue<Op>> chForRaftIndex;
+    if (waitApplyCh.find(raftIndex) == waitApplyCh.end())
+    {
+      // 从对象池获取 LockQueue
+      chForRaftIndex = lockQueuePool_.acquire();
+      waitApplyCh[raftIndex] = chForRaftIndex.get();
+    }
+    else
+    {
+      // 这种情况下需要创建新的，因为原有代码使用裸指针
+      chForRaftIndex = std::make_shared<LockQueue<Op>>();
+      waitApplyCh[raftIndex] = chForRaftIndex.get();
+    }
+
+    m_mtx.unlock();
+
+    // 等待结果
+    bool success = chForRaftIndex->timeOutPop(timeoutMs, result);
+
+    // 清理
+    m_mtx.lock();
+    waitApplyCh.erase(raftIndex);
+    m_mtx.unlock();
+
+    // 归还到对象池
+    lockQueuePool_.release(chForRaftIndex);
+
+    return success;
+  }
+}
+
+void KvServer::SetWaitMode(bool usePromiseFuture)
+{
+  std::lock_guard<std::mutex> lock(m_mtx);
+  usePromiseFuture_ = usePromiseFuture;
+
+  DPrintf("[SetWaitMode] KvServer %d switched to %s mode",
+          m_me, usePromiseFuture ? "Promise/Future" : "LockQueue Pool");
+}
+
+void KvServer::UpdateRaftStateSize(size_t newSize)
+{
+  m_raftStateSize.store(newSize);
 }
