@@ -19,6 +19,7 @@
 #include "kvServerRPC.pb.h"
 #include "raft-kv/common/promise_future.h"
 #include "raft-kv/raftCore/raft.h"
+#include "raft-kv/raftCore/StreamingSnapshot.h"
 #include "raft-kv/skipList/skipList.h"
 
 /**
@@ -178,6 +179,24 @@ public:
   void IfNeedToSendSnapShotCommand(int raftIndex, int proportion);
 
   /**
+   * @brief 智能快照触发检查
+   * @param raftIndex Raft索引
+   * @return 是否需要制作快照
+   *
+   * 基于多个条件判断是否需要制作快照：
+   * 1. Raft状态大小超过阈值
+   * 2. 距离上次快照时间超过阈值
+   * 3. 日志条目数量超过阈值
+   */
+  bool ShouldTakeSnapshot(int raftIndex);
+
+  /**
+   * @brief 更新内存中的Raft状态大小缓存
+   * @param deltaSize 大小变化量（可为负数）
+   */
+  void UpdateRaftStateSizeCache(long long deltaSize);
+
+  /**
    * @brief 处理来自kv.rf.applyCh的快照
    * @param message 应用消息
    */
@@ -188,6 +207,18 @@ public:
    * @return 快照数据字符串
    */
   std::string MakeSnapShot();
+
+  /**
+   * @brief 制作流式快照
+   * @return 快照文件路径，失败时返回空字符串
+   */
+  std::string MakeStreamingSnapshot();
+
+  /**
+   * @brief 从流式快照恢复数据
+   * @param snapshotPath 快照文件路径
+   */
+  void ReadStreamingSnapshotToInstall(const std::string &snapshotPath);
 
 public: // for rpc
   /**
@@ -270,4 +301,12 @@ private:
   int m_lastSnapShotRaftLogIndex;                           // 最后一个快照点的Raft日志索引
   std::atomic<size_t> m_raftStateSize;                      // 缓存的 Raft 状态大小，避免频繁读文件
   std::chrono::steady_clock::time_point m_lastSnapshotTime; // 上次快照时间
+
+  // 快照触发配置常量
+  static constexpr double SNAPSHOT_SIZE_THRESHOLD_RATIO = 0.1;       // 状态大小阈值比例（10%）
+  static constexpr std::chrono::minutes SNAPSHOT_TIME_THRESHOLD{60}; // 时间阈值（60分钟）
+  static constexpr int SNAPSHOT_LOG_ENTRIES_THRESHOLD = 1000;        // 日志条目数阈值
+
+  // 流式快照管理器
+  std::unique_ptr<StreamingSnapshotManager> m_streamingSnapshotManager;
 };

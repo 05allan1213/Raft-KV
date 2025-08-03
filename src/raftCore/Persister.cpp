@@ -3,10 +3,10 @@
 
 /**
  * @brief 保存Raft状态和快照到本地文件
- * 
+ *
  * 将Raft状态数据和快照数据同时保存到本地文件中。
  * 注意：会涉及反复打开文件的操作，没有考虑如果文件出现问题会怎么办？
- * 
+ *
  * @param raftstate Raft状态数据
  * @param snapshot 快照数据
  */
@@ -14,7 +14,7 @@ void Persister::Save(const std::string raftstate, const std::string snapshot)
 {
   std::lock_guard<std::mutex> lg(m_mtx);
   clearRaftStateAndSnapshot();
-  
+
   // 将raftstate和snapshot写入本地文件
   m_raftStateOutStream << raftstate;
   m_snapshotOutStream << snapshot;
@@ -22,16 +22,16 @@ void Persister::Save(const std::string raftstate, const std::string snapshot)
 
 /**
  * @brief 从本地文件读取快照数据
- * 
+ *
  * 从快照文件中读取之前保存的快照数据。
  * 如果文件不存在或读取失败，返回空字符串。
- * 
+ *
  * @return 快照数据字符串
  */
 std::string Persister::ReadSnapshot()
 {
   std::lock_guard<std::mutex> lg(m_mtx);
-  
+
   // 如果输出流已打开，先关闭
   if (m_snapshotOutStream.is_open())
   {
@@ -42,7 +42,7 @@ std::string Persister::ReadSnapshot()
   {
     m_snapshotOutStream.open(m_snapshotFileName); // 默认是追加模式
   };
-  
+
   // 读取快照文件
   std::fstream ifs(m_snapshotFileName, std::ios_base::in);
   if (!ifs.good())
@@ -61,7 +61,10 @@ void Persister::SaveRaftState(const std::string &data)
   // 将raftstate和snapshot写入本地文件
   clearRaftState();
   m_raftStateOutStream << data;
-  m_raftStateSize += data.size();
+  m_raftStateOutStream.flush(); // 确保数据写入磁盘
+
+  // 更新状态大小为当前数据的大小（而不是累加）
+  m_raftStateSize = data.size();
 }
 
 long long Persister::RaftStateSize()
@@ -89,6 +92,7 @@ std::string Persister::ReadRaftState()
 Persister::Persister(const int me)
     : m_raftStateFileName("raftstatePersist" + std::to_string(me) + ".txt"),
       m_snapshotFileName("snapshotPersist" + std::to_string(me) + ".txt"),
+      m_streamingSnapshotFileName("streamingSnapshotPersist" + std::to_string(me) + ".txt"),
       m_raftStateSize(0)
 {
   /**
@@ -161,4 +165,61 @@ void Persister::clearRaftStateAndSnapshot()
 {
   clearRaftState();
   clearSnapshot();
+}
+
+bool Persister::SaveStreamingSnapshot(const std::string &snapshotFilePath)
+{
+  std::lock_guard<std::mutex> lg(m_mtx);
+
+  try
+  {
+    // 将临时快照文件复制到持久化位置
+    std::ifstream src(snapshotFilePath, std::ios::binary);
+    if (!src.is_open())
+    {
+      DPrintf("[Persister::SaveStreamingSnapshot] Failed to open source file: %s", snapshotFilePath.c_str());
+      return false;
+    }
+
+    std::ofstream dst(m_streamingSnapshotFileName, std::ios::binary | std::ios::trunc);
+    if (!dst.is_open())
+    {
+      DPrintf("[Persister::SaveStreamingSnapshot] Failed to open destination file: %s",
+              m_streamingSnapshotFileName.c_str());
+      return false;
+    }
+
+    // 复制文件内容
+    dst << src.rdbuf();
+
+    src.close();
+    dst.close();
+
+    DPrintf("[Persister::SaveStreamingSnapshot] Saved streaming snapshot to: %s",
+            m_streamingSnapshotFileName.c_str());
+    return true;
+  }
+  catch (const std::exception &e)
+  {
+    DPrintf("[Persister::SaveStreamingSnapshot] Exception: %s", e.what());
+    return false;
+  }
+}
+
+std::string Persister::ReadStreamingSnapshot()
+{
+  std::lock_guard<std::mutex> lg(m_mtx);
+
+  // 检查文件是否存在
+  std::ifstream file(m_streamingSnapshotFileName);
+  if (!file.good())
+  {
+    DPrintf("[Persister::ReadStreamingSnapshot] File not found: %s", m_streamingSnapshotFileName.c_str());
+    return "";
+  }
+  file.close();
+
+  DPrintf("[Persister::ReadStreamingSnapshot] Found streaming snapshot: %s",
+          m_streamingSnapshotFileName.c_str());
+  return m_streamingSnapshotFileName;
 }

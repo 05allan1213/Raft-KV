@@ -723,9 +723,30 @@ void Raft::persist()
 {
   // Your code here (2C).
   auto data = persistData();
+
+  // 获取持久化前的状态大小
+  long long oldSize = m_persister->RaftStateSize();
+
   m_persister->SaveRaftState(data);
+
+  // 计算状态大小变化并通知回调
+  if (m_stateSizeChangeCallback)
+  {
+    long long newSize = m_persister->RaftStateSize();
+    long long deltaSize = newSize - oldSize;
+    if (deltaSize != 0)
+    {
+      m_stateSizeChangeCallback(deltaSize);
+    }
+  }
+
   // fmt.Printf("RaftNode[%d] persist starts, currentTerm[%d] voteFor[%d] log[%v]\n", rf.me, rf.currentTerm,
   // rf.votedFor, rf.logs) fmt.Printf("%v\n", string(data))
+}
+
+void Raft::SetStateSizeChangeCallback(std::function<void(long long)> callback)
+{
+  m_stateSizeChangeCallback = callback;
 }
 
 void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs *args, raftRpcProctoc::RequestVoteReply *reply)
@@ -1355,6 +1376,55 @@ void Raft::Snapshot(int index, std::string snapshot)
 
   DPrintf("[SnapShot]Server %d snapshot snapshot index {%d}, term {%d}, loglen {%d}", m_me, index,
           m_lastSnapshotIncludeTerm, m_logs.size());
+  myAssert(m_logs.size() + m_lastSnapshotIncludeIndex == lastLogIndex,
+           format("len(rf.logs){%d} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
+                  m_lastSnapshotIncludeIndex, lastLogIndex));
+}
+
+void Raft::StreamingSnapshot(int index, const std::string &snapshotFilePath)
+{
+  std::lock_guard<std::mutex> lg(m_mtx);
+
+  if (m_lastSnapshotIncludeIndex >= index || index > m_commitIndex)
+  {
+    DPrintf(
+        "[func-StreamingSnapshot-rf{%d}] rejects replacing log with snapshotIndex %d as current snapshotIndex %d is larger or "
+        "smaller ",
+        m_me, index, m_lastSnapshotIncludeIndex);
+    return;
+  }
+  auto lastLogIndex = getLastLogIndex(); // 为了检查snapshot前后日志是否一样，防止多截取或者少截取日志
+
+  // 制造完此快照后剩余的所有日志
+  int newLastSnapshotIncludeIndex = index;
+  int newLastSnapshotIncludeTerm = m_logs[getSlicesIndexFromLogIndex(index)].logterm();
+  std::vector<raftRpcProctoc::LogEntry> trunckedLogs;
+  // todo :这种写法有点笨，待改进，而且有内存泄漏的风险
+  for (int i = index + 1; i <= getLastLogIndex(); i++)
+  {
+    // 注意有=，因为要拿到最后一个日志
+    trunckedLogs.push_back(m_logs[getSlicesIndexFromLogIndex(i)]);
+  }
+  m_lastSnapshotIncludeIndex = newLastSnapshotIncludeIndex;
+  m_lastSnapshotIncludeTerm = newLastSnapshotIncludeTerm;
+  m_logs = trunckedLogs;
+  m_commitIndex = std::max(m_commitIndex, index);
+  m_lastApplied = std::max(m_lastApplied, index);
+
+  // 保存流式快照
+  if (m_persister->SaveStreamingSnapshot(snapshotFilePath))
+  {
+    // 持久化Raft状态
+    m_persister->SaveRaftState(persistData());
+
+    DPrintf("[StreamingSnapshot]Server %d streaming snapshot index {%d}, term {%d}, loglen {%d}", m_me, index,
+            m_lastSnapshotIncludeTerm, m_logs.size());
+  }
+  else
+  {
+    DPrintf("[StreamingSnapshot]Server %d failed to save streaming snapshot", m_me);
+  }
+
   myAssert(m_logs.size() + m_lastSnapshotIncludeIndex == lastLogIndex,
            format("len(rf.logs){%d} + rf.lastSnapshotIncludeIndex{%d} != lastLogjInde{%d}", m_logs.size(),
                   m_lastSnapshotIncludeIndex, lastLogIndex));

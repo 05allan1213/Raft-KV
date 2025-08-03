@@ -410,12 +410,87 @@ bool KvServer::SendMessageToWaitChan(const Op &op, int raftIndex)
 
 void KvServer::IfNeedToSendSnapShotCommand(int raftIndex, int proportion)
 {
-  if (m_raftNode->GetRaftStateSize() > m_maxRaftState / 10.0)
+  if (ShouldTakeSnapshot(raftIndex))
   {
-    // Send SnapShot Command
-    auto snapshot = MakeSnapShot();
-    m_raftNode->Snapshot(raftIndex, snapshot);
+    // 根据数据大小选择快照方式
+    size_t skipListSize = m_skipList.size();
+    const size_t STREAMING_THRESHOLD = 10000; // 超过10000个元素使用流式快照
+
+    if (skipListSize > STREAMING_THRESHOLD)
+    {
+      // 使用流式快照
+      auto snapshotPath = MakeStreamingSnapshot();
+      if (!snapshotPath.empty())
+      {
+        m_raftNode->StreamingSnapshot(raftIndex, snapshotPath);
+        DPrintf("[IfNeedToSendSnapShotCommand] Server %d used streaming snapshot for %zu elements",
+                m_me, skipListSize);
+      }
+      else
+      {
+        DPrintf("[IfNeedToSendSnapShotCommand] Server %d failed to create streaming snapshot, falling back to regular snapshot", m_me);
+        // 回退到常规快照
+        auto snapshot = MakeSnapShot();
+        m_raftNode->Snapshot(raftIndex, snapshot);
+      }
+    }
+    else
+    {
+      // 使用常规快照
+      auto snapshot = MakeSnapShot();
+      m_raftNode->Snapshot(raftIndex, snapshot);
+      DPrintf("[IfNeedToSendSnapShotCommand] Server %d used regular snapshot for %zu elements",
+              m_me, skipListSize);
+    }
+
+    // 更新快照时间
+    m_lastSnapshotTime = std::chrono::steady_clock::now();
   }
+}
+
+bool KvServer::ShouldTakeSnapshot(int raftIndex)
+{
+  // 条件1：检查Raft状态大小（使用缓存的值，避免IO）
+  size_t currentRaftStateSize = m_raftStateSize.load();
+  bool sizeExceeded = currentRaftStateSize > static_cast<size_t>(m_maxRaftState * SNAPSHOT_SIZE_THRESHOLD_RATIO);
+
+  // 条件2：检查时间间隔
+  auto now = std::chrono::steady_clock::now();
+  auto timeSinceLastSnapshot = now - m_lastSnapshotTime;
+  bool timeExceeded = timeSinceLastSnapshot > SNAPSHOT_TIME_THRESHOLD;
+
+  // 条件3：检查日志条目数量（从上次快照点到当前索引）
+  int logEntriesSinceSnapshot = raftIndex - m_lastSnapShotRaftLogIndex;
+  bool logEntriesExceeded = logEntriesSinceSnapshot > SNAPSHOT_LOG_ENTRIES_THRESHOLD;
+
+  // 任何一个条件满足都触发快照
+  bool shouldSnapshot = sizeExceeded || timeExceeded || logEntriesExceeded;
+
+  if (shouldSnapshot)
+  {
+    DPrintf("[ShouldTakeSnapshot] Server %d triggering snapshot at index %d. "
+            "Size: %zu/%d (exceeded: %s), Time: %lld min (exceeded: %s), "
+            "LogEntries: %d/%d (exceeded: %s)",
+            m_me, raftIndex, currentRaftStateSize, m_maxRaftState,
+            sizeExceeded ? "yes" : "no",
+            std::chrono::duration_cast<std::chrono::minutes>(timeSinceLastSnapshot).count(),
+            timeExceeded ? "yes" : "no",
+            logEntriesSinceSnapshot, SNAPSHOT_LOG_ENTRIES_THRESHOLD,
+            logEntriesExceeded ? "yes" : "no");
+  }
+
+  return shouldSnapshot;
+}
+
+void KvServer::UpdateRaftStateSizeCache(long long deltaSize)
+{
+  // 原子操作更新缓存的Raft状态大小
+  size_t oldSize = m_raftStateSize.load();
+  size_t newSize = static_cast<size_t>(std::max(0LL, static_cast<long long>(oldSize) + deltaSize));
+  m_raftStateSize.store(newSize);
+
+  DPrintf("[UpdateRaftStateSizeCache] Server %d: size changed from %zu to %zu (delta: %lld)",
+          m_me, oldSize, newSize, deltaSize);
 }
 
 void KvServer::GetSnapShotFromRaft(ApplyMsg message)
@@ -434,6 +509,47 @@ std::string KvServer::MakeSnapShot()
   std::lock_guard<std::mutex> lg(m_mtx);
   std::string snapshotData = getSnapshotData();
   return snapshotData;
+}
+
+std::string KvServer::MakeStreamingSnapshot()
+{
+  std::lock_guard<std::mutex> lg(m_mtx);
+
+  std::string snapshotPath;
+  if (m_streamingSnapshotManager->CreateSnapshot(m_skipList, m_lastRequestId, snapshotPath))
+  {
+    DPrintf("[MakeStreamingSnapshot] Server %d created streaming snapshot: %s", m_me, snapshotPath.c_str());
+    return snapshotPath;
+  }
+  else
+  {
+    DPrintf("[MakeStreamingSnapshot] Server %d failed to create streaming snapshot", m_me);
+    return "";
+  }
+}
+
+void KvServer::ReadStreamingSnapshotToInstall(const std::string &snapshotPath)
+{
+  if (snapshotPath.empty())
+  {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lg(m_mtx);
+
+  if (m_streamingSnapshotManager->RestoreSnapshot(snapshotPath, m_skipList, m_lastRequestId))
+  {
+    DPrintf("[ReadStreamingSnapshotToInstall] Server %d restored streaming snapshot from: %s",
+            m_me, snapshotPath.c_str());
+
+    // 清理临时文件
+    StreamingSnapshotManager::CleanupTempFile(snapshotPath);
+  }
+  else
+  {
+    DPrintf("[ReadStreamingSnapshotToInstall] Server %d failed to restore streaming snapshot from: %s",
+            m_me, snapshotPath.c_str());
+  }
 }
 
 void KvServer::PutAppend(google::protobuf::RpcController *controller, const ::raftKVRpcProctoc::PutAppendArgs *request,
@@ -458,9 +574,12 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   m_maxRaftState = maxraftstate;
 
   // 初始化优化相关变量
-  usePromiseFuture_ = true; // 默认使用优化的 Promise/Future 模式
-  m_raftStateSize.store(0);
+  usePromiseFuture_ = true;                          // 默认使用优化的 Promise/Future 模式
+  m_raftStateSize.store(persister->RaftStateSize()); // 从持久化存储中读取初始状态大小
   m_lastSnapshotTime = std::chrono::steady_clock::now();
+
+  // 初始化流式快照管理器
+  m_streamingSnapshotManager = std::make_unique<StreamingSnapshotManager>(me);
 
   applyChan = std::make_shared<LockQueue<ApplyMsg>>();
 
@@ -518,6 +637,10 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   sleep(ipPortVt.size() - me); // 等待所有节点相互连接成功，再启动raft
   m_raftNode->init(servers, m_me, persister, applyChan);
   // kv的server直接与raft通信，但kv不直接与raft通信，所以需要把ApplyMsg的chan传递下去用于通信，两者的persist也是共用的
+
+  // 设置状态大小变化回调
+  m_raftNode->SetStateSizeChangeCallback([this](long long deltaSize)
+                                         { this->UpdateRaftStateSizeCache(deltaSize); });
 
   m_skipList;
   waitApplyCh;

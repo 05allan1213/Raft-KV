@@ -4,6 +4,7 @@
 #include <boost/serialization/vector.hpp>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -106,6 +107,9 @@ private:
 
   // 协程管理器
   std::unique_ptr<monsoon::IOManager> m_ioManager = nullptr; // IO管理器，用于协程调度
+
+  // 状态大小变化回调
+  std::function<void(long long)> m_stateSizeChangeCallback; // 状态大小变化回调函数
 
 public:
   /**
@@ -345,6 +349,15 @@ public:
    */
   void Snapshot(int index, std::string snapshot);
 
+  /**
+   * @brief 创建流式快照
+   * @param index 快照包含的最后一个日志索引
+   * @param snapshotFilePath 快照文件路径
+   *
+   * 流式快照版本，避免大内存占用
+   */
+  void StreamingSnapshot(int index, const std::string &snapshotFilePath);
+
 public:
   // 重写基类方法，因为rpc远程调用真正调用的是这个方法
   // 序列化，反序列化等操作rpc框架都已经做完了，因此这里只需要获取值然后真正调用本地方法即可。
@@ -384,6 +397,12 @@ public:
    */
   void init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
             std::shared_ptr<LockQueue<ApplyMsg>> applyCh);
+
+  /**
+   * @brief 设置状态大小变化回调函数
+   * @param callback 回调函数，参数为状态大小变化量
+   */
+  void SetStateSizeChangeCallback(std::function<void(long long)> callback);
 
   /**
    * @brief 添加节点到集群
