@@ -2,8 +2,14 @@
 
 #include <rpcprovider.h>
 
-#include "mprpcconfig.h"
+#include "raft-kv/rpc/mprpcconfig.h"
 
+/**
+ * @brief 打印KV数据库内容（调试用）
+ *
+ * 在调试模式下，打印当前KV数据库中所有键值对的内容。
+ * 使用跳表的数据结构来展示数据。
+ */
 void KvServer::DprintfKVDB()
 {
   if (!Debug)
@@ -13,81 +19,101 @@ void KvServer::DprintfKVDB()
   std::lock_guard<std::mutex> lg(m_mtx);
   DEFER
   {
-    // for (const auto &item: m_kvDB) {
-    //     DPrintf("[DBInfo ----]Key : %s, Value : %s", &item.first, &item.second);
-    // }
+    // 显示跳表中的所有键值对
     m_skipList.display_list();
   };
 }
 
+/**
+ * @brief 在KV数据库上执行Append操作
+ *
+ * 将新的值追加到指定键的现有值后面。
+ * 如果键不存在，则创建新键值对。
+ *
+ * @param op 包含操作信息的Op对象
+ */
 void KvServer::ExecuteAppendOpOnKVDB(Op op)
 {
-  // if op.IfDuplicate {   //get请求是可重复执行的，因此可以不用判复
-  //	return
-  // }
+  // Get请求是可重复执行的，因此可以不用判断重复
   m_mtx.lock();
 
+  // 使用跳表执行Append操作
   m_skipList.insert_set_element(op.Key, op.Value);
 
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     m_kvDB[op.Key] = m_kvDB[op.Key] + op.Value;
-  // } else {
-  //     m_kvDB.insert(std::make_pair(op.Key, op.Value));
-  // }
+  // 记录客户端的最新请求ID，用于重复请求检测
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExeAPPEND-----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
+  // 调试模式下打印数据库内容
   DprintfKVDB();
 }
 
+/**
+ * @brief 在KV数据库上执行Get操作
+ *
+ * 根据键查找对应的值，如果键存在则返回true和对应的值，
+ * 如果键不存在则返回false和空字符串。
+ *
+ * @param op 包含操作信息的Op对象
+ * @param value 返回的值
+ * @param exist 键是否存在
+ */
 void KvServer::ExecuteGetOpOnKVDB(Op op, std::string *value, bool *exist)
 {
   m_mtx.lock();
   *value = "";
   *exist = false;
+
+  // 使用跳表查找键值对
   if (m_skipList.search_element(op.Key, *value))
   {
     *exist = true;
-    // *value = m_skipList.se //value已经完成赋值了
+    // value已经通过search_element完成赋值了
   }
-  // if (m_kvDB.find(op.Key) != m_kvDB.end()) {
-  //     *exist = true;
-  //     *value = m_kvDB[op.Key];
-  // }
+
+  // 记录客户端的最新请求ID，用于重复请求检测
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  if (*exist)
-  {
-    //                DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, value :%v", op.ClientId,
-    //                op.RequestId, op.Key, value)
-  }
-  else
-  {
-    //        DPrintf("[KVServerExeGET----]ClientId :%d ,RequestID :%d ,Key : %v, But No KEY!!!!", op.ClientId,
-    //        op.RequestId, op.Key)
-  }
+  // 调试模式下打印数据库内容
   DprintfKVDB();
 }
 
+/**
+ * @brief 在KV数据库上执行Put操作
+ *
+ * 将键值对插入或更新到数据库中。
+ * 如果键已存在，则更新其值；如果键不存在，则创建新的键值对。
+ *
+ * @param op 包含操作信息的Op对象
+ */
 void KvServer::ExecutePutOpOnKVDB(Op op)
 {
   m_mtx.lock();
+
+  // 使用跳表执行Put操作
   m_skipList.insert_set_element(op.Key, op.Value);
-  // m_kvDB[op.Key] = op.Value;
+
+  // 记录客户端的最新请求ID，用于重复请求检测
   m_lastRequestId[op.ClientId] = op.RequestId;
   m_mtx.unlock();
 
-  //    DPrintf("[KVServerExePUT----]ClientId :%d ,RequestID :%d ,Key : %v, value : %v", op.ClientId, op.RequestId,
-  //    op.Key, op.Value)
+  // 调试模式下打印数据库内容
   DprintfKVDB();
 }
 
-// 处理来自clerk的Get RPC
+/**
+ * @brief 处理来自客户端的Get RPC请求
+ *
+ * 该函数处理客户端的Get请求，将请求提交给Raft共识算法，
+ * 确保在分布式环境中数据的一致性。
+ *
+ * @param args Get请求参数，包含键、客户端ID、请求ID等
+ * @param reply Get响应结果，包含值、错误信息等
+ */
 void KvServer::Get(const raftKVRpcProctoc::GetArgs *args, raftKVRpcProctoc::GetReply *reply)
 {
+  // 构造操作对象
   Op op;
   op.Operation = "Get";
   op.Key = args->key();
@@ -240,14 +266,6 @@ bool KvServer::ifRequestDuplicate(std::string ClientId, int RequestId)
     // todo :不存在这个client就创建
   }
   return RequestId <= m_lastRequestId[ClientId];
-}
-
-bool KvServer::isLeader()
-{
-  int term;
-  bool isLeader;
-  m_raftNode->GetState(&term, &isLeader);
-  return isLeader;
 }
 
 // get和put//append執行的具體細節是不一樣的

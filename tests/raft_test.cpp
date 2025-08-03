@@ -1,127 +1,120 @@
+/**
+ * @file raft_test.cpp
+ * @brief Raft集群启动器
+ * 
+ * 该文件实现了一个Raft集群启动器，可以启动指定数量的Raft节点，
+ * 用于测试和演示Raft共识算法的功能。
+ * 
+ * @author Raft-KV Team
+ * @date 2024
+ */
+
 #include <iostream>
 #include <vector>
-#include <thread>
-#include <chrono>
-#include <memory>
+#include <string>
 #include <fstream>
-#include <unistd.h> // for pause()
-
-// 包含所有需要的头文件
+#include <unistd.h>
+#include <random>
 #include "raft-kv/raftCore/kvServer.h"
-#include "raft-kv/common/util.h"
-#include "kvServerRPC.pb.h" // 包含 Get/Put 的 RPC 定义
 
-// 函数：找到 Leader 节点
-// 修正：调用公有的 isLeader() 方法
-int findLeader(const std::vector<std::shared_ptr<KvServer>> &cluster)
+/**
+ * @brief 显示程序使用说明
+ * 
+ * 当用户输入参数不正确时，显示正确的命令行参数格式。
+ */
+void show_usage()
 {
-    for (int i = 0; i < cluster.size(); ++i)
-    {
-        if (cluster[i]->isLeader())
-        {
-            return i;
-        }
-    }
-    return -1;
+    std::cerr << "Usage: ./raft_cluster_launcher -n <number_of_nodes> -f <config_file_name>" << std::endl;
 }
 
-int main()
+/**
+ * @brief 主函数 - Raft集群启动器
+ * 
+ * 该函数解析命令行参数，启动指定数量的Raft节点，
+ * 每个节点运行在独立的进程中。
+ * 
+ * @param argc 命令行参数数量
+ * @param argv 命令行参数数组
+ * @return 程序退出码
+ */
+int main(int argc, char **argv)
 {
-    // 1. 设置集群
-    const int clusterSize = 3;
-    const int maxRaftState = -1;
-    const std::string configFile = "test.conf";
-    short basePort = 8000;
-
-    // 清理并准备配置文件
-    std::ofstream conf_file_writer(configFile, std::ios::trunc);
-    conf_file_writer.close();
-
-    std::vector<std::shared_ptr<KvServer>> cluster;
-
-    std::cout << "--- Creating a cluster of " << clusterSize << " nodes ---" << std::endl;
-
-    // 2. 创建所有节点
-    for (int i = 0; i < clusterSize; ++i)
+    // 检查命令行参数数量
+    if (argc < 5)
     {
-        auto kv = std::make_shared<KvServer>(i, maxRaftState, configFile, basePort + i);
-        cluster.push_back(kv);
-        // KvServer 在构造时已启动内部线程，无需在此处创建
+        show_usage();
+        return 1;
     }
 
-    std::cout << "--- Waiting for leader election ---" << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-
-    // 3. 检查 Leader
-    int leaderId = findLeader(cluster);
-    if (leaderId == -1)
+    int nodeNum = 0;
+    std::string configFileName;
+    int opt;
+    
+    // 解析命令行参数
+    while ((opt = getopt(argc, argv, "n:f:")) != -1)
     {
-        std::cerr << "[Error] No leader elected after 5 seconds!" << std::endl;
-    }
-    else
-    {
-        std::cout << "[Success] Node " << leaderId << " is the leader." << std::endl;
-    }
-
-    // 4. 测试数据复制
-    if (leaderId != -1)
-    {
-        std::cout << "--- Testing data replication (Put) ---" << std::endl;
-
-        raftKVRpcProctoc::PutAppendArgs putArgs;
-        raftKVRpcProctoc::PutAppendReply putReply;
-        putArgs.set_key("name");
-        putArgs.set_value("raft-kv");
-        putArgs.set_op("Put");
-        putArgs.set_clientid("test-client");
-        putArgs.set_requestid(1);
-
-        // 修正：对于本地同步调用，最后一个参数（Closure）可以传 nullptr
-        cluster[leaderId]->PutAppend(nullptr, &putArgs, &putReply, nullptr);
-
-        // 修正：通过 reply.err() 判断是否成功
-        if (putReply.err() == OK)
+        switch (opt)
         {
-            std::cout << "--- Command proposed to leader, waiting for replication ---" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(2)); // 等待日志复制
-
-            std::cout << "--- Verifying data on all nodes (Get) ---" << std::endl;
-            bool all_synced = true;
-            for (int i = 0; i < clusterSize; ++i)
-            {
-                raftKVRpcProctoc::GetArgs getArgs;
-                raftKVRpcProctoc::GetReply getReply;
-                getArgs.set_key("name");
-                getArgs.set_clientid("test-client-verify");
-                getArgs.set_requestid(i + 1);
-
-                // 修正：最后一个参数传 nullptr
-                cluster[i]->Get(nullptr, &getArgs, &getReply, nullptr);
-
-                if (getReply.err() == OK && getReply.value() == "raft-kv")
-                {
-                    std::cout << "Node " << i << " synced. Key: name, Value: " << getReply.value() << std::endl;
-                }
-                else
-                {
-                    std::cerr << "[Error] Node " << i << " did not sync or Get failed! Reply: " << getReply.err() << std::endl;
-                    all_synced = false;
-                }
-            }
-
-            if (all_synced)
-            {
-                std::cout << "[Success] Data replicated to all nodes." << std::endl;
-            }
-        }
-        else
-        {
-            std::cerr << "[Error] Failed to propose command to leader. Reason: " << putReply.err() << std::endl;
+        case 'n':
+            nodeNum = std::atoi(optarg);
+            break;
+        case 'f':
+            configFileName = optarg;
+            break;
+        default:
+            show_usage();
+            return 1;
         }
     }
 
-    // 主线程暂停，防止程序直接退出
-    std::cout << "--- Test running, press Ctrl+C to exit ---" << std::endl;
+    // 验证参数有效性
+    if (nodeNum <= 0 || configFileName.empty())
+    {
+        show_usage();
+        return 1;
+    }
+
+    // 清空配置文件，准备写入新的节点信息
+    std::ofstream ofs(configFileName, std::ios::trunc);
+    ofs.close();
+
+    // 随机选择一个起始端口，避免端口冲突
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> distrib(10000, 30000);
+    short basePort = distrib(gen);
+
+    std::cout << "--- Starting a " << nodeNum << "-node Raft cluster ---" << std::endl;
+    std::cout << "Config file: " << configFileName << ", Base port: " << basePort << std::endl;
+
+    // 启动指定数量的Raft节点
+    for (int i = 0; i < nodeNum; ++i)
+    {
+        pid_t pid = fork();
+        if (pid == 0)
+        { 
+            // 子进程：启动单个Raft节点
+            short port = basePort + i;
+            std::cout << "[Launcher] Starting Node " << i << " on port " << port << " (PID: " << getpid() << ")" << std::endl;
+            
+            // 每个子进程创建一个KvServer实例并永久运行
+            KvServer kv(i, -1, configFileName, port);
+            pause(); // 阻塞子进程，防止其退出
+            exit(0);
+        }
+        else if (pid < 0)
+        {
+            std::cerr << "Failed to fork process for node " << i << std::endl;
+            // 在此可能需要杀死已经创建的子进程
+            return 1;
+        }
+        
+        // 父进程继续循环创建下一个节点
+        sleep(1); // 稍微延迟，确保端口写入配置文件
+    }
+
+    std::cout << "--- All cluster nodes launched. Parent process will wait. (PID: " << getpid() << ") ---" << std::endl;
+    // 父进程也阻塞，以便观察或手动终止
     pause();
 
     return 0;

@@ -5,37 +5,50 @@
 #include "config.h"
 #include "util.h"
 
-void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpcProctoc::AppendEntriesReply* reply) {
+/**
+ * @brief 处理AppendEntries RPC请求的核心函数
+ *
+ * 这是Raft算法中最重要的函数之一，负责处理来自领导者的日志复制请求。
+ * 该函数实现了Raft论文中AppendEntries RPC的完整逻辑。
+ *
+ * @param args RPC请求参数，包含任期、领导者ID、前一个日志信息等
+ * @param reply RPC响应结果，包含是否成功、当前任期等信息
+ */
+void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs *args, raftRpcProctoc::AppendEntriesReply *reply)
+{
   std::lock_guard<std::mutex> locker(m_mtx);
-  reply->set_appstate(AppNormal);  // 能接收到代表网络是正常的
-  // Your code here (2A, 2B).
-  //	不同的人收到AppendEntries的反应是不同的，要注意无论什么时候收到rpc请求和响应都要检查term
+  reply->set_appstate(AppNormal); // 能接收到代表网络是正常的
 
-  if (args->term() < m_currentTerm) {
+  // 第一步：检查任期号，这是Raft算法的核心安全保证
+  // 不同的人收到AppendEntries的反应是不同的，要注意无论什么时候收到rpc请求和响应都要检查term
+
+  if (args->term() < m_currentTerm)
+  {
     reply->set_success(false);
     reply->set_term(m_currentTerm);
-    reply->set_updatenextindex(-100);  // 论文中：让领导人可以及时更新自己
+    reply->set_updatenextindex(-100); // 论文中：让领导人可以及时更新自己
     DPrintf("[func-AppendEntries-rf{%d}] 拒绝了 因为Leader{%d}的term{%v}< rf{%d}.term{%d}\n", m_me, args->leaderid(),
             args->term(), m_me, m_currentTerm);
-    return;  // 注意从过期的领导人收到消息不要重设定时器
+    return; // 注意从过期的领导人收到消息不要重设定时器
   }
   //    Defer ec1([this]() -> void { this->persist(); });
   //    //由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
-  DEFER { persist(); };  //由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
-  if (args->term() > m_currentTerm) {
+  DEFER { persist(); }; // 由于这个局部变量创建在锁之后，因此执行persist的时候应该也是拿到锁的.
+  if (args->term() > m_currentTerm)
+  {
     // 三变 ,防止遗漏，无论什么时候都是三变
     // DPrintf("[func-AppendEntries-rf{%v} ] 变成follower且更新term 因为Leader{%v}的term{%v}> rf{%v}.term{%v}\n", rf.me,
     // args.LeaderId, args.Term, rf.me, rf.currentTerm)
     m_status = Follower;
     m_currentTerm = args->term();
-    m_votedFor = -1;  // 这里设置成-1有意义，如果突然宕机然后上线理论上是可以投票的
+    m_votedFor = -1; // 这里设置成-1有意义，如果突然宕机然后上线理论上是可以投票的
     // 这里可不返回，应该改成让改节点尝试接收日志
     // 如果是领导人和candidate突然转到Follower好像也不用其他操作
     // 如果本来就是Follower，那么其term变化，相当于“不言自明”的换了追随的对象，因为原来的leader的term更小，是不会再接收其消息了
   }
-  myAssert(args->term() == m_currentTerm, format("assert {args.Term == rf.currentTerm} fail"));
+  myAssert(args->term() == m_currentTerm, "assert {args.Term == rf.currentTerm} fail");
   // 如果发生网络分区，那么candidate可能会收到同一个term的leader的消息，要转变为Follower，为了和上面，因此直接写
-  m_status = Follower;  // 这里是有必要的，因为如果candidate收到同一个term的leader的AE，需要变成follower
+  m_status = Follower; // 这里是有必要的，因为如果candidate收到同一个term的leader的AE，需要变成follower
   // term相等
   m_lastResetElectionTime = now();
   //  DPrintf("[	AppendEntries-func-rf(%v)		] 重置了选举超时定时器\n", rf.me);
@@ -43,53 +56,63 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
   // 不能无脑的从prevlogIndex开始阶段日志，因为rpc可能会延迟，导致发过来的log是很久之前的
 
   //	那么就比较日志，日志有3种情况
-  if (args->prevlogindex() > getLastLogIndex()) {
+  if (args->prevlogindex() > getLastLogIndex())
+  {
     reply->set_success(false);
     reply->set_term(m_currentTerm);
     reply->set_updatenextindex(getLastLogIndex() + 1);
     //  DPrintf("[func-AppendEntries-rf{%v}] 拒绝了节点{%v}，因为日志太新,args.PrevLogIndex{%v} >
     //  lastLogIndex{%v}，返回值：{%v}\n", rf.me, args.LeaderId, args.PrevLogIndex, rf.getLastLogIndex(), reply)
     return;
-  } else if (args->prevlogindex() < m_lastSnapshotIncludeIndex) {
+  }
+  else if (args->prevlogindex() < m_lastSnapshotIncludeIndex)
+  {
     // 如果prevlogIndex还没有更上快照
     reply->set_success(false);
     reply->set_term(m_currentTerm);
     reply->set_updatenextindex(
         m_lastSnapshotIncludeIndex +
-        1);  // todo 如果想直接弄到最新好像不对，因为是从后慢慢往前匹配的，这里不匹配说明后面的都不匹配
+        1); // todo 如果想直接弄到最新好像不对，因为是从后慢慢往前匹配的，这里不匹配说明后面的都不匹配
     //  DPrintf("[func-AppendEntries-rf{%v}] 拒绝了节点{%v}，因为log太老，返回值：{%v}\n", rf.me, args.LeaderId, reply)
     //  return
   }
   //	本机日志有那么长，冲突(same index,different term),截断日志
   // 注意：这里目前当args.PrevLogIndex == rf.lastSnapshotIncludeIndex与不等的时候要分开考虑，可以看看能不能优化这块
-  if (matchLog(args->prevlogindex(), args->prevlogterm())) {
+  if (matchLog(args->prevlogindex(), args->prevlogterm()))
+  {
     //	todo：	整理logs
-    //，不能直接截断，必须一个一个检查，因为发送来的log可能是之前的，直接截断可能导致“取回”已经在follower日志中的条目
+    // ，不能直接截断，必须一个一个检查，因为发送来的log可能是之前的，直接截断可能导致“取回”已经在follower日志中的条目
     // 那意思是不是可能会有一段发来的AE中的logs中前半是匹配的，后半是不匹配的，这种应该：1.follower如何处理？ 2.如何给leader回复
     // 3. leader如何处理
 
-    for (int i = 0; i < args->entries_size(); i++) {
+    for (int i = 0; i < args->entries_size(); i++)
+    {
       auto log = args->entries(i);
-      if (log.logindex() > getLastLogIndex()) {
-        //超过就直接添加日志
+      if (log.logindex() > getLastLogIndex())
+      {
+        // 超过就直接添加日志
         m_logs.push_back(log);
-      } else {
-        //没超过就比较是否匹配，不匹配再更新，而不是直接截断
-        // todo ： 这里可以改进为比较对应logIndex位置的term是否相等，term相等就代表匹配
-        //  todo：这个地方放出来会出问题,按理说index相同，term相同，log也应该相同才对
-        // rf.logs[entry.Index-firstIndex].Term ?= entry.Term
+      }
+      else
+      {
+        // 没超过就比较是否匹配，不匹配再更新，而不是直接截断
+        //  todo ： 这里可以改进为比较对应logIndex位置的term是否相等，term相等就代表匹配
+        //   todo：这个地方放出来会出问题,按理说index相同，term相同，log也应该相同才对
+        //  rf.logs[entry.Index-firstIndex].Term ?= entry.Term
 
         if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() == log.logterm() &&
-            m_logs[getSlicesIndexFromLogIndex(log.logindex())].command() != log.command()) {
-          //相同位置的log ，其logTerm相等，但是命令却不相同，不符合raft的前向匹配，异常了！
+            m_logs[getSlicesIndexFromLogIndex(log.logindex())].command() != log.command())
+        {
+          // 相同位置的log ，其logTerm相等，但是命令却不相同，不符合raft的前向匹配，异常了！
           myAssert(false, format("[func-AppendEntries-rf{%d}] 两节点logIndex{%d}和term{%d}相同，但是其command{%d:%d}   "
                                  " {%d:%d}却不同！！\n",
                                  m_me, log.logindex(), log.logterm(), m_me,
                                  m_logs[getSlicesIndexFromLogIndex(log.logindex())].command(), args->leaderid(),
                                  log.command()));
         }
-        if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() != log.logterm()) {
-          //不匹配就更新
+        if (m_logs[getSlicesIndexFromLogIndex(log.logindex())].logterm() != log.logterm())
+        {
+          // 不匹配就更新
           m_logs[getSlicesIndexFromLogIndex(log.logindex())] = log;
         }
       }
@@ -106,7 +129,8 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     //	fmt.Printf("[func-AppendEntries  rf:{%v}] ] : args.term:%v, rf.term:%v  ,rf.logs的长度：%v\n", rf.me, args.Term,
     // rf.currentTerm, len(rf.logs))
     // }
-    if (args->leadercommit() > m_commitIndex) {
+    if (args->leadercommit() > m_commitIndex)
+    {
       m_commitIndex = std::min(args->leadercommit(), getLastLogIndex());
       // 这个地方不能无脑跟上getLastLogIndex()，因为可能存在args->leadercommit()落后于 getLastLogIndex()的情况
     }
@@ -123,15 +147,19 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
     //                args.LeaderId, rf.getLastLogIndex(), reply)
 
     return;
-  } else {
+  }
+  else
+  {
     // 优化
     // PrevLogIndex 长度合适，但是不匹配，因此往前寻找 矛盾的term的第一个元素
     // 为什么该term的日志都是矛盾的呢？也不一定都是矛盾的，只是这么优化减少rpc而已
     // ？什么时候term会矛盾呢？很多情况，比如leader接收了日志之后马上就崩溃等等
     reply->set_updatenextindex(args->prevlogindex());
 
-    for (int index = args->prevlogindex(); index >= m_lastSnapshotIncludeIndex; --index) {
-      if (getLogTermFromLogIndex(index) != getLogTermFromLogIndex(args->prevlogindex())) {
+    for (int index = args->prevlogindex(); index >= m_lastSnapshotIncludeIndex; --index)
+    {
+      if (getLogTermFromLogIndex(index) != getLogTermFromLogIndex(args->prevlogindex()))
+      {
         reply->set_updatenextindex(index + 1);
         break;
       }
@@ -152,29 +180,45 @@ void Raft::AppendEntries1(const raftRpcProctoc::AppendEntriesArgs* args, raftRpc
   // fmt.Printf("[func-AppendEntries,rf{%v}]:len(rf.logs):%v, rf.commitIndex:%v\n", rf.me, len(rf.logs), rf.commitIndex)
 }
 
-void Raft::applierTicker() {
-  while (true) {
+/**
+ * @brief 应用日志到状态机的定时器函数
+ *
+ * 该函数运行在一个独立的线程中，定期检查并应用已提交但未应用的日志条目到状态机。
+ * 这是Raft算法中确保状态机一致性的关键机制。
+ */
+void Raft::applierTicker()
+{
+  while (true)
+  {
     m_mtx.lock();
-    if (m_status == Leader) {
+    if (m_status == Leader)
+    {
       DPrintf("[Raft::applierTicker() - raft{%d}]  m_lastApplied{%d}   m_commitIndex{%d}", m_me, m_lastApplied,
               m_commitIndex);
     }
     auto applyMsgs = getApplyLogs();
     m_mtx.unlock();
-    //使用匿名函数是因为传递管道的时候不用拿锁
-    // todo:好像必须拿锁，因为不拿锁的话如果调用多次applyLog函数，可能会导致应用的顺序不一样
-    if (!applyMsgs.empty()) {
+
+    // 使用匿名函数是因为传递管道的时候不用拿锁
+    // 好像必须拿锁，因为不拿锁的话如果调用多次applyLog函数，可能会导致应用的顺序不一样
+    if (!applyMsgs.empty())
+    {
       DPrintf("[func- Raft::applierTicker()-raft{%d}] 向kvserver報告的applyMsgs長度爲：{%d}", m_me, applyMsgs.size());
     }
-    for (auto& message : applyMsgs) {
+
+    // 将待应用的日志消息推送到应用通道
+    for (auto &message : applyMsgs)
+    {
       applyChan->Push(message);
     }
-    // usleep(1000 * ApplyInterval);
+
+    // 休眠一段时间后继续检查
     sleepNMilliseconds(ApplyInterval);
   }
 }
 
-bool Raft::CondInstallSnapshot(int lastIncludedTerm, int lastIncludedIndex, std::string snapshot) {
+bool Raft::CondInstallSnapshot(int lastIncludedTerm, int lastIncludedIndex, std::string snapshot)
+{
   return true;
   //// Your code here (2D).
   // rf.mu.Lock()
@@ -199,33 +243,38 @@ bool Raft::CondInstallSnapshot(int lastIncludedTerm, int lastIncludedIndex, std:
   // return true
 }
 
-void Raft::doElection() {
+void Raft::doElection()
+{
   std::lock_guard<std::mutex> g(m_mtx);
 
-  if (m_status == Leader) {
+  if (m_status == Leader)
+  {
     // fmt.Printf("[       ticker-func-rf(%v)              ] is a Leader,wait the  lock\n", rf.me)
   }
   // fmt.Printf("[       ticker-func-rf(%v)              ] get the  lock\n", rf.me)
 
-  if (m_status != Leader) {
+  if (m_status != Leader)
+  {
     DPrintf("[       ticker-func-rf(%d)              ]  选举定时器到期且不是leader，开始选举 \n", m_me);
-    //当选举的时候定时器超时就必须重新选举，不然没有选票就会一直卡主
-    //重竞选超时，term也会增加的
+    // 当选举的时候定时器超时就必须重新选举，不然没有选票就会一直卡主
+    // 重竞选超时，term也会增加的
     m_status = Candidate;
-    ///开始新一轮的选举
+    /// 开始新一轮的选举
     m_currentTerm += 1;
-    m_votedFor = m_me;  //即是自己给自己投，也避免candidate给同辈的candidate投
+    m_votedFor = m_me; // 即是自己给自己投，也避免candidate给同辈的candidate投
     persist();
-    std::shared_ptr<int> votedNum = std::make_shared<int>(1);  // 使用 make_shared 函数初始化 !! 亮点
+    std::shared_ptr<int> votedNum = std::make_shared<int>(1); // 使用 make_shared 函数初始化 !! 亮点
     //	重新设置定时器
     m_lastResetElectionTime = now();
     //	发布RequestVote RPC
-    for (int i = 0; i < m_peers.size(); i++) {
-      if (i == m_me) {
+    for (int i = 0; i < m_peers.size(); i++)
+    {
+      if (i == m_me)
+      {
         continue;
       }
       int lastLogIndex = -1, lastLogTerm = -1;
-      getLastLogIndexAndTerm(&lastLogIndex, &lastLogTerm);  //获取最后一个log的term和下标
+      getLastLogIndexAndTerm(&lastLogIndex, &lastLogTerm); // 获取最后一个log的term和下标
 
       std::shared_ptr<raftRpcProctoc::RequestVoteArgs> requestVoteArgs =
           std::make_shared<raftRpcProctoc::RequestVoteArgs>();
@@ -235,41 +284,46 @@ void Raft::doElection() {
       requestVoteArgs->set_lastlogterm(lastLogTerm);
       auto requestVoteReply = std::make_shared<raftRpcProctoc::RequestVoteReply>();
 
-      //使用匿名函数执行避免其拿到锁
+      // 使用匿名函数执行避免其拿到锁
 
       std::thread t(&Raft::sendRequestVote, this, i, requestVoteArgs, requestVoteReply,
-                    votedNum);  // 创建新线程并执行b函数，并传递参数
+                    votedNum); // 创建新线程并执行b函数，并传递参数
       t.detach();
     }
   }
 }
 
-void Raft::doHeartBeat() {
+void Raft::doHeartBeat()
+{
   std::lock_guard<std::mutex> g(m_mtx);
 
-  if (m_status == Leader) {
+  if (m_status == Leader)
+  {
     DPrintf("[func-Raft::doHeartBeat()-Leader: {%d}] Leader的心跳定时器触发了且拿到mutex，开始发送AE\n", m_me);
-    auto appendNums = std::make_shared<int>(1);  //正确返回的节点的数量
+    auto appendNums = std::make_shared<int>(1); // 正确返回的节点的数量
 
-    //对Follower（除了自己外的所有节点发送AE）
-    // todo 这里肯定是要修改的，最好使用一个单独的goruntime来负责管理发送log，因为后面的log发送涉及优化之类的
-    //最少要单独写一个函数来管理，而不是在这一坨
-    for (int i = 0; i < m_peers.size(); i++) {
-      if (i == m_me) {
+    // 对Follower（除了自己外的所有节点发送AE）
+    //  todo 这里肯定是要修改的，最好使用一个单独的goruntime来负责管理发送log，因为后面的log发送涉及优化之类的
+    // 最少要单独写一个函数来管理，而不是在这一坨
+    for (int i = 0; i < m_peers.size(); i++)
+    {
+      if (i == m_me)
+      {
         continue;
       }
       DPrintf("[func-Raft::doHeartBeat()-Leader: {%d}] Leader的心跳定时器触发了 index:{%d}\n", m_me, i);
       myAssert(m_nextIndex[i] >= 1, format("rf.nextIndex[%d] = {%d}", i, m_nextIndex[i]));
-      //日志压缩加入后要判断是发送快照还是发送AE
-      if (m_nextIndex[i] <= m_lastSnapshotIncludeIndex) {
+      // 日志压缩加入后要判断是发送快照还是发送AE
+      if (m_nextIndex[i] <= m_lastSnapshotIncludeIndex)
+      {
         //                        DPrintf("[func-ticker()-rf{%v}]rf.nextIndex[%v] {%v} <=
         //                        rf.lastSnapshotIncludeIndex{%v},so leaderSendSnapShot", rf.me, i, rf.nextIndex[i],
         //                        rf.lastSnapshotIncludeIndex)
-        std::thread t(&Raft::leaderSendSnapShot, this, i);  // 创建新线程并执行b函数，并传递参数
+        std::thread t(&Raft::leaderSendSnapShot, this, i); // 创建新线程并执行b函数，并传递参数
         t.detach();
         continue;
       }
-      //构造发送值
+      // 构造发送值
       int preLogIndex = -1;
       int PrevLogTerm = -1;
       getPrevLogInfo(i, &preLogIndex, &PrevLogTerm);
@@ -281,15 +335,20 @@ void Raft::doHeartBeat() {
       appendEntriesArgs->set_prevlogterm(PrevLogTerm);
       appendEntriesArgs->clear_entries();
       appendEntriesArgs->set_leadercommit(m_commitIndex);
-      if (preLogIndex != m_lastSnapshotIncludeIndex) {
-        for (int j = getSlicesIndexFromLogIndex(preLogIndex) + 1; j < m_logs.size(); ++j) {
-          raftRpcProctoc::LogEntry* sendEntryPtr = appendEntriesArgs->add_entries();
-          *sendEntryPtr = m_logs[j];  //=是可以点进去的，可以点进去看下protobuf如何重写这个的
+      if (preLogIndex != m_lastSnapshotIncludeIndex)
+      {
+        for (int j = getSlicesIndexFromLogIndex(preLogIndex) + 1; j < m_logs.size(); ++j)
+        {
+          raftRpcProctoc::LogEntry *sendEntryPtr = appendEntriesArgs->add_entries();
+          *sendEntryPtr = m_logs[j]; //=是可以点进去的，可以点进去看下protobuf如何重写这个的
         }
-      } else {
-        for (const auto& item : m_logs) {
-          raftRpcProctoc::LogEntry* sendEntryPtr = appendEntriesArgs->add_entries();
-          *sendEntryPtr = item;  //=是可以点进去的，可以点进去看下protobuf如何重写这个的
+      }
+      else
+      {
+        for (const auto &item : m_logs)
+        {
+          raftRpcProctoc::LogEntry *sendEntryPtr = appendEntriesArgs->add_entries();
+          *sendEntryPtr = item; //=是可以点进去的，可以点进去看下protobuf如何重写这个的
         }
       }
       int lastLogIndex = getLastLogIndex();
@@ -297,28 +356,31 @@ void Raft::doHeartBeat() {
       myAssert(appendEntriesArgs->prevlogindex() + appendEntriesArgs->entries_size() == lastLogIndex,
                format("appendEntriesArgs.PrevLogIndex{%d}+len(appendEntriesArgs.Entries){%d} != lastLogIndex{%d}",
                       appendEntriesArgs->prevlogindex(), appendEntriesArgs->entries_size(), lastLogIndex));
-      //构造返回值
+      // 构造返回值
       const std::shared_ptr<raftRpcProctoc::AppendEntriesReply> appendEntriesReply =
           std::make_shared<raftRpcProctoc::AppendEntriesReply>();
       appendEntriesReply->set_appstate(Disconnected);
 
       std::thread t(&Raft::sendAppendEntries, this, i, appendEntriesArgs, appendEntriesReply,
-                    appendNums);  // 创建新线程并执行b函数，并传递参数
+                    appendNums); // 创建新线程并执行b函数，并传递参数
       t.detach();
     }
-    m_lastResetHearBeatTime = now();  // leader发送心跳，就不是随机时间了
+    m_lastResetHearBeatTime = now(); // leader发送心跳，就不是随机时间了
   }
 }
 
-void Raft::electionTimeOutTicker() {
+void Raft::electionTimeOutTicker()
+{
   // Check if a Leader election should be started.
-  while (true) {
+  while (true)
+  {
     /**
      * 如果不睡眠，那么对于leader，这个函数会一直空转，浪费cpu。且加入协程之后，空转会导致其他协程无法运行，对于时间敏感的AE，会导致心跳无法正常发送导致异常
      */
-    while (m_status == Leader) {
+    while (m_status == Leader)
+    {
       usleep(
-          HeartBeatTimeout);  //定时时间没有严谨设置，因为HeartBeatTimeout比选举超时一般小一个数量级，因此就设置为HeartBeatTimeout了
+          HeartBeatTimeout); // 定时时间没有严谨设置，因为HeartBeatTimeout比选举超时一般小一个数量级，因此就设置为HeartBeatTimeout了
     }
     std::chrono::duration<signed long int, std::ratio<1, 1000000000>> suitableSleepTime{};
     std::chrono::system_clock::time_point wakeTime{};
@@ -329,7 +391,8 @@ void Raft::electionTimeOutTicker() {
       m_mtx.unlock();
     }
 
-    if (std::chrono::duration<double, std::milli>(suitableSleepTime).count() > 1) {
+    if (std::chrono::duration<double, std::milli>(suitableSleepTime).count() > 1)
+    {
       // 获取当前时间点
       auto start = std::chrono::steady_clock::now();
 
@@ -350,20 +413,23 @@ void Raft::electionTimeOutTicker() {
                 << std::endl;
     }
 
-    if (std::chrono::duration<double, std::milli>(m_lastResetElectionTime - wakeTime).count() > 0) {
-      //说明睡眠的这段时间有重置定时器，那么就没有超时，再次睡眠
+    if (std::chrono::duration<double, std::milli>(m_lastResetElectionTime - wakeTime).count() > 0)
+    {
+      // 说明睡眠的这段时间有重置定时器，那么就没有超时，再次睡眠
       continue;
     }
     doElection();
   }
 }
 
-std::vector<ApplyMsg> Raft::getApplyLogs() {
+std::vector<ApplyMsg> Raft::getApplyLogs()
+{
   std::vector<ApplyMsg> applyMsgs;
   myAssert(m_commitIndex <= getLastLogIndex(), format("[func-getApplyLogs-rf{%d}] commitIndex{%d} >getLastLogIndex{%d}",
                                                       m_me, m_commitIndex, getLastLogIndex()));
 
-  while (m_lastApplied < m_commitIndex) {
+  while (m_lastApplied < m_commitIndex)
+  {
     m_lastApplied++;
     myAssert(m_logs[getSlicesIndexFromLogIndex(m_lastApplied)].logindex() == m_lastApplied,
              format("rf.logs[rf.getSlicesIndexFromLogIndex(rf.lastApplied)].LogIndex{%d} != rf.lastApplied{%d} ",
@@ -382,7 +448,8 @@ std::vector<ApplyMsg> Raft::getApplyLogs() {
 }
 
 // 获取新命令应该分配的Index
-int Raft::getNewCommandIndex() {
+int Raft::getNewCommandIndex()
+{
   //	如果len(logs)==0,就为快照的index+1，否则为log最后一个日志+1
   auto lastLogIndex = getLastLogIndex();
   return lastLogIndex + 1;
@@ -390,10 +457,12 @@ int Raft::getNewCommandIndex() {
 
 // getPrevLogInfo
 // leader调用，传入：服务器index，传出：发送的AE的preLogIndex和PrevLogTerm
-void Raft::getPrevLogInfo(int server, int* preIndex, int* preTerm) {
+void Raft::getPrevLogInfo(int server, int *preIndex, int *preTerm)
+{
   // logs长度为0返回0,0，不是0就根据nextIndex数组的数值返回
-  if (m_nextIndex[server] == m_lastSnapshotIncludeIndex + 1) {
-    //要发送的日志是第一个日志，因此直接返回m_lastSnapshotIncludeIndex和m_lastSnapshotIncludeTerm
+  if (m_nextIndex[server] == m_lastSnapshotIncludeIndex + 1)
+  {
+    // 要发送的日志是第一个日志，因此直接返回m_lastSnapshotIncludeIndex和m_lastSnapshotIncludeTerm
     *preIndex = m_lastSnapshotIncludeIndex;
     *preTerm = m_lastSnapshotIncludeTerm;
     return;
@@ -405,9 +474,11 @@ void Raft::getPrevLogInfo(int server, int* preIndex, int* preTerm) {
 
 // GetState return currentTerm and whether this server
 // believes it is the Leader.
-void Raft::GetState(int* term, bool* isLeader) {
+void Raft::GetState(int *term, bool *isLeader)
+{
   m_mtx.lock();
-  DEFER {
+  DEFER
+  {
     // todo 暂时不清楚会不会导致死锁
     m_mtx.unlock();
   };
@@ -417,19 +488,22 @@ void Raft::GetState(int* term, bool* isLeader) {
   *isLeader = (m_status == Leader);
 }
 
-void Raft::InstallSnapshot(const raftRpcProctoc::InstallSnapshotRequest* args,
-                           raftRpcProctoc::InstallSnapshotResponse* reply) {
+void Raft::InstallSnapshot(const raftRpcProctoc::InstallSnapshotRequest *args,
+                           raftRpcProctoc::InstallSnapshotResponse *reply)
+{
   m_mtx.lock();
   DEFER { m_mtx.unlock(); };
-  if (args->term() < m_currentTerm) {
+  if (args->term() < m_currentTerm)
+  {
     reply->set_term(m_currentTerm);
     //        DPrintf("[func-InstallSnapshot-rf{%v}] leader{%v}.term{%v}<rf{%v}.term{%v} ", rf.me, args.LeaderId,
     //        args.Term, rf.me, rf.currentTerm)
 
     return;
   }
-  if (args->term() > m_currentTerm) {
-    //后面两种情况都要接收日志
+  if (args->term() > m_currentTerm)
+  {
+    // 后面两种情况都要接收日志
     m_currentTerm = args->term();
     m_votedFor = -1;
     m_status = Follower;
@@ -438,20 +512,24 @@ void Raft::InstallSnapshot(const raftRpcProctoc::InstallSnapshotRequest* args,
   m_status = Follower;
   m_lastResetElectionTime = now();
   // outdated snapshot
-  if (args->lastsnapshotincludeindex() <= m_lastSnapshotIncludeIndex) {
+  if (args->lastsnapshotincludeindex() <= m_lastSnapshotIncludeIndex)
+  {
     //        DPrintf("[func-InstallSnapshot-rf{%v}] leader{%v}.LastSnapShotIncludeIndex{%v} <=
     //        rf{%v}.lastSnapshotIncludeIndex{%v} ", rf.me, args.LeaderId, args.LastSnapShotIncludeIndex, rf.me,
     //        rf.lastSnapshotIncludeIndex)
     return;
   }
-  //截断日志，修改commitIndex和lastApplied
-  //截断日志包括：日志长了，截断一部分，日志短了，全部清空，其实两个是一种情况
-  //但是由于现在getSlicesIndexFromLogIndex的实现，不能传入不存在logIndex，否则会panic
+  // 截断日志，修改commitIndex和lastApplied
+  // 截断日志包括：日志长了，截断一部分，日志短了，全部清空，其实两个是一种情况
+  // 但是由于现在getSlicesIndexFromLogIndex的实现，不能传入不存在logIndex，否则会panic
   auto lastLogIndex = getLastLogIndex();
 
-  if (lastLogIndex > args->lastsnapshotincludeindex()) {
+  if (lastLogIndex > args->lastsnapshotincludeindex())
+  {
     m_logs.erase(m_logs.begin(), m_logs.begin() + getSlicesIndexFromLogIndex(args->lastsnapshotincludeindex()) + 1);
-  } else {
+  }
+  else
+  {
     m_logs.clear();
   }
   m_commitIndex = std::max(m_commitIndex, args->lastsnapshotincludeindex());
@@ -466,21 +544,24 @@ void Raft::InstallSnapshot(const raftRpcProctoc::InstallSnapshotRequest* args,
   msg.SnapshotTerm = args->lastsnapshotincludeterm();
   msg.SnapshotIndex = args->lastsnapshotincludeindex();
 
-  std::thread t(&Raft::pushMsgToKvServer, this, msg);  // 创建新线程并执行b函数，并传递参数
+  std::thread t(&Raft::pushMsgToKvServer, this, msg); // 创建新线程并执行b函数，并传递参数
   t.detach();
-  //看下这里能不能再优化
-  //    DPrintf("[func-InstallSnapshot-rf{%v}] receive snapshot from {%v} ,LastSnapShotIncludeIndex ={%v} ", rf.me,
-  //    args.LeaderId, args.LastSnapShotIncludeIndex)
-  //持久化
+  // 看下这里能不能再优化
+  //     DPrintf("[func-InstallSnapshot-rf{%v}] receive snapshot from {%v} ,LastSnapShotIncludeIndex ={%v} ", rf.me,
+  //     args.LeaderId, args.LastSnapShotIncludeIndex)
+  // 持久化
   m_persister->Save(persistData(), args->data());
 }
 
 void Raft::pushMsgToKvServer(ApplyMsg msg) { applyChan->Push(msg); }
 
-void Raft::leaderHearBeatTicker() {
-  while (true) {
-    //不是leader的话就没有必要进行后续操作，况且还要拿锁，很影响性能，目前是睡眠，后面再优化优化
-    while (m_status != Leader) {
+void Raft::leaderHearBeatTicker()
+{
+  while (true)
+  {
+    // 不是leader的话就没有必要进行后续操作，况且还要拿锁，很影响性能，目前是睡眠，后面再优化优化
+    while (m_status != Leader)
+    {
       usleep(1000 * HeartBeatTimeout);
       // std::this_thread::sleep_for(std::chrono::milliseconds(HeartBeatTimeout));
     }
@@ -494,7 +575,8 @@ void Raft::leaderHearBeatTicker() {
       suitableSleepTime = std::chrono::milliseconds(HeartBeatTimeout) + m_lastResetHearBeatTime - wakeTime;
     }
 
-    if (std::chrono::duration<double, std::milli>(suitableSleepTime).count() > 1) {
+    if (std::chrono::duration<double, std::milli>(suitableSleepTime).count() > 1)
+    {
       std::cout << atomicCount << "\033[1;35m leaderHearBeatTicker();函数设置睡眠时间为: "
                 << std::chrono::duration_cast<std::chrono::milliseconds>(suitableSleepTime).count() << " 毫秒\033[0m"
                 << std::endl;
@@ -516,8 +598,9 @@ void Raft::leaderHearBeatTicker() {
       ++atomicCount;
     }
 
-    if (std::chrono::duration<double, std::milli>(m_lastResetHearBeatTime - wakeTime).count() > 0) {
-      //睡眠的这段时间有重置定时器，没有超时，再次睡眠
+    if (std::chrono::duration<double, std::milli>(m_lastResetHearBeatTime - wakeTime).count() > 0)
+    {
+      // 睡眠的这段时间有重置定时器，没有超时，再次睡眠
       continue;
     }
     // DPrintf("[func-Raft::doHeartBeat()-Leader: {%d}] Leader的心跳定时器触发了\n", m_me);
@@ -525,7 +608,8 @@ void Raft::leaderHearBeatTicker() {
   }
 }
 
-void Raft::leaderSendSnapShot(int server) {
+void Raft::leaderSendSnapShot(int server)
+{
   m_mtx.lock();
   raftRpcProctoc::InstallSnapshotRequest args;
   args.set_leaderid(m_me);
@@ -539,15 +623,18 @@ void Raft::leaderSendSnapShot(int server) {
   bool ok = m_peers[server]->InstallSnapshot(&args, &reply);
   m_mtx.lock();
   DEFER { m_mtx.unlock(); };
-  if (!ok) {
+  if (!ok)
+  {
     return;
   }
-  if (m_status != Leader || m_currentTerm != args.term()) {
-    return;  //中间释放过锁，可能状态已经改变了
+  if (m_status != Leader || m_currentTerm != args.term())
+  {
+    return; // 中间释放过锁，可能状态已经改变了
   }
   //	无论什么时候都要判断term
-  if (reply.term() > m_currentTerm) {
-    //三变
+  if (reply.term() > m_currentTerm)
+  {
+    // 三变
     m_currentTerm = reply.term();
     m_votedFor = -1;
     m_status = Follower;
@@ -559,18 +646,23 @@ void Raft::leaderSendSnapShot(int server) {
   m_nextIndex[server] = m_matchIndex[server] + 1;
 }
 
-void Raft::leaderUpdateCommitIndex() {
+void Raft::leaderUpdateCommitIndex()
+{
   m_commitIndex = m_lastSnapshotIncludeIndex;
   // for index := rf.commitIndex+1;index < len(rf.log);index++ {
   // for index := rf.getLastIndex();index>=rf.commitIndex+1;index--{
-  for (int index = getLastLogIndex(); index >= m_lastSnapshotIncludeIndex + 1; index--) {
+  for (int index = getLastLogIndex(); index >= m_lastSnapshotIncludeIndex + 1; index--)
+  {
     int sum = 0;
-    for (int i = 0; i < m_peers.size(); i++) {
-      if (i == m_me) {
+    for (int i = 0; i < m_peers.size(); i++)
+    {
+      if (i == m_me)
+      {
         sum += 1;
         continue;
       }
-      if (m_matchIndex[i] >= index) {
+      if (m_matchIndex[i] >= index)
+      {
         sum += 1;
       }
     }
@@ -578,7 +670,8 @@ void Raft::leaderUpdateCommitIndex() {
     //        !!!只有当前term有新提交的，才会更新commitIndex！！！！
     // log.Printf("lastSSP:%d, index: %d, commitIndex: %d, lastIndex: %d",rf.lastSSPointIndex, index, rf.commitIndex,
     // rf.getLastIndex())
-    if (sum >= m_peers.size() / 2 + 1 && getLogTermFromLogIndex(index) == m_currentTerm) {
+    if (sum >= m_peers.size() / 2 + 1 && getLogTermFromLogIndex(index) == m_currentTerm)
+    {
       m_commitIndex = index;
       break;
     }
@@ -587,8 +680,9 @@ void Raft::leaderUpdateCommitIndex() {
   //    %d",rf.me,rf.me,rf.currentTerm,rf.commitIndex)
 }
 
-//进来前要保证logIndex是存在的，即≥rf.lastSnapshotIncludeIndex	，而且小于等于rf.getLastLogIndex()
-bool Raft::matchLog(int logIndex, int logTerm) {
+// 进来前要保证logIndex是存在的，即≥rf.lastSnapshotIncludeIndex	，而且小于等于rf.getLastLogIndex()
+bool Raft::matchLog(int logIndex, int logTerm)
+{
   myAssert(logIndex >= m_lastSnapshotIncludeIndex && logIndex <= getLastLogIndex(),
            format("不满足：logIndex{%d}>=rf.lastSnapshotIncludeIndex{%d}&&logIndex{%d}<=rf.getLastLogIndex{%d}",
                   logIndex, m_lastSnapshotIncludeIndex, logIndex, getLastLogIndex()));
@@ -600,7 +694,8 @@ bool Raft::matchLog(int logIndex, int logTerm) {
   // }
 }
 
-void Raft::persist() {
+void Raft::persist()
+{
   // Your code here (2C).
   auto data = persistData();
   m_persister->SaveRaftState(data);
@@ -608,24 +703,28 @@ void Raft::persist() {
   // rf.votedFor, rf.logs) fmt.Printf("%v\n", string(data))
 }
 
-void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProctoc::RequestVoteReply* reply) {
+void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs *args, raftRpcProctoc::RequestVoteReply *reply)
+{
   std::lock_guard<std::mutex> lg(m_mtx);
 
   // Your code here (2A, 2B).
-  DEFER {
-    //应该先持久化，再撤销lock
+  DEFER
+  {
+    // 应该先持久化，再撤销lock
     persist();
   };
-  //对args的term的三种情况分别进行处理，大于小于等于自己的term都是不同的处理
-  // reason: 出现网络分区，该竞选者已经OutOfDate(过时）
-  if (args->term() < m_currentTerm) {
+  // 对args的term的三种情况分别进行处理，大于小于等于自己的term都是不同的处理
+  //  reason: 出现网络分区，该竞选者已经OutOfDate(过时）
+  if (args->term() < m_currentTerm)
+  {
     reply->set_term(m_currentTerm);
     reply->set_votestate(Expire);
     reply->set_votegranted(false);
     return;
   }
   // fig2:右下角，如果任何时候rpc请求或者响应的term大于自己的term，更新term，并变成follower
-  if (args->term() > m_currentTerm) {
+  if (args->term() > m_currentTerm)
+  {
     //        DPrintf("[	    func-RequestVote-rf(%v)		] : 变成follower且更新term
     //        因为candidate{%v}的term{%v}> rf{%v}.term{%v}\n ", rf.me, args.CandidateId, args.Term, rf.me,
     //        rf.currentTerm)
@@ -634,22 +733,26 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
     m_votedFor = -1;
 
     //	重置定时器：收到leader的ae，开始选举，透出票
-    //这时候更新了term之后，votedFor也要置为-1
+    // 这时候更新了term之后，votedFor也要置为-1
   }
   myAssert(args->term() == m_currentTerm,
            format("[func--rf{%d}] 前面校验过args.Term==rf.currentTerm，这里却不等", m_me));
   //	现在节点任期都是相同的(任期小的也已经更新到新的args的term了)，还需要检查log的term和index是不是匹配的了
 
   int lastLogTerm = getLastLogTerm();
-  //只有没投票，且candidate的日志的新的程度 ≥ 接受者的日志新的程度 才会授票
-  if (!UpToDate(args->lastlogindex(), args->lastlogterm())) {
+  // 只有没投票，且candidate的日志的新的程度 ≥ 接受者的日志新的程度 才会授票
+  if (!UpToDate(args->lastlogindex(), args->lastlogterm()))
+  {
     // args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
-    //日志太旧了
-    if (args->lastlogterm() < lastLogTerm) {
+    // 日志太旧了
+    if (args->lastlogterm() < lastLogTerm)
+    {
       //                    DPrintf("[	    func-RequestVote-rf(%v)		] : refuse voted rf[%v] ,because
       //                    candidate_lastlog_term{%v} < lastlog_term{%v}\n", rf.me, args.CandidateId, args.LastLogTerm,
       //                    lastLogTerm)
-    } else {
+    }
+    else
+    {
       //            DPrintf("[	    func-RequestVote-rf(%v)		] : refuse voted rf[%v] ,because
       //            candidate_log_index{%v} < log_index{%v}\n", rf.me, args.CandidateId, args.LastLogIndex,
       //            rf.getLastLogIndex())
@@ -662,7 +765,8 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
   }
   // todo ： 啥时候会出现rf.votedFor == args.CandidateId ，就算candidate选举超时再选举，其term也是不一样的呀
   //     当因为网络质量不好导致的请求丢失重发就有可能！！！！
-  if (m_votedFor != -1 && m_votedFor != args->candidateid()) {
+  if (m_votedFor != -1 && m_votedFor != args->candidateid())
+  {
     //        DPrintf("[	    func-RequestVote-rf(%v)		] : refuse voted rf[%v] ,because has voted\n",
     //        rf.me, args.CandidateId)
     reply->set_term(m_currentTerm);
@@ -670,9 +774,11 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
     reply->set_votegranted(false);
 
     return;
-  } else {
+  }
+  else
+  {
     m_votedFor = args->candidateid();
-    m_lastResetElectionTime = now();  //认为必须要在投出票的时候才重置定时器，
+    m_lastResetElectionTime = now(); // 认为必须要在投出票的时候才重置定时器，
     //        DPrintf("[	    func-RequestVote-rf(%v)		] : voted rf[%v]\n", rf.me, rf.votedFor)
     reply->set_term(m_currentTerm);
     reply->set_votestate(Normal);
@@ -682,7 +788,8 @@ void Raft::RequestVote(const raftRpcProctoc::RequestVoteArgs* args, raftRpcProct
   }
 }
 
-bool Raft::UpToDate(int index, int term) {
+bool Raft::UpToDate(int index, int term)
+{
   // lastEntry := rf.log[len(rf.log)-1]
 
   int lastIndex = -1;
@@ -691,12 +798,16 @@ bool Raft::UpToDate(int index, int term) {
   return term > lastTerm || (term == lastTerm && index >= lastIndex);
 }
 
-void Raft::getLastLogIndexAndTerm(int* lastLogIndex, int* lastLogTerm) {
-  if (m_logs.empty()) {
+void Raft::getLastLogIndexAndTerm(int *lastLogIndex, int *lastLogTerm)
+{
+  if (m_logs.empty())
+  {
     *lastLogIndex = m_lastSnapshotIncludeIndex;
     *lastLogTerm = m_lastSnapshotIncludeTerm;
     return;
-  } else {
+  }
+  else
+  {
     *lastLogIndex = m_logs[m_logs.size() - 1].logindex();
     *lastLogTerm = m_logs[m_logs.size() - 1].logterm();
     return;
@@ -707,14 +818,16 @@ void Raft::getLastLogIndexAndTerm(int* lastLogIndex, int* lastLogTerm) {
  * @return 最新的log的logindex，即log的逻辑index。区别于log在m_logs中的物理index
  * 可见：getLastLogIndexAndTerm()
  */
-int Raft::getLastLogIndex() {
+int Raft::getLastLogIndex()
+{
   int lastLogIndex = -1;
   int _ = -1;
   getLastLogIndexAndTerm(&lastLogIndex, &_);
   return lastLogIndex;
 }
 
-int Raft::getLastLogTerm() {
+int Raft::getLastLogTerm()
+{
   int _ = -1;
   int lastLogTerm = -1;
   getLastLogIndexAndTerm(&_, &lastLogTerm);
@@ -726,7 +839,8 @@ int Raft::getLastLogTerm() {
  * @param logIndex log的逻辑index。注意区别于m_logs的物理index
  * @return
  */
-int Raft::getLogTermFromLogIndex(int logIndex) {
+int Raft::getLogTermFromLogIndex(int logIndex)
+{
   myAssert(logIndex >= m_lastSnapshotIncludeIndex,
            format("[func-getSlicesIndexFromLogIndex-rf{%d}]  index{%d} < rf.lastSnapshotIncludeIndex{%d}", m_me,
                   logIndex, m_lastSnapshotIncludeIndex));
@@ -736,9 +850,12 @@ int Raft::getLogTermFromLogIndex(int logIndex) {
   myAssert(logIndex <= lastLogIndex, format("[func-getSlicesIndexFromLogIndex-rf{%d}]  logIndex{%d} > lastLogIndex{%d}",
                                             m_me, logIndex, lastLogIndex));
 
-  if (logIndex == m_lastSnapshotIncludeIndex) {
+  if (logIndex == m_lastSnapshotIncludeIndex)
+  {
     return m_lastSnapshotIncludeTerm;
-  } else {
+  }
+  else
+  {
     return m_logs[getSlicesIndexFromLogIndex(logIndex)].logterm();
   }
 }
@@ -747,7 +864,8 @@ int Raft::GetRaftStateSize() { return m_persister->RaftStateSize(); }
 
 // 找到index对应的真实下标位置！！！
 // 限制，输入的logIndex必须保存在当前的logs里面（不包含snapshot）
-int Raft::getSlicesIndexFromLogIndex(int logIndex) {
+int Raft::getSlicesIndexFromLogIndex(int logIndex)
+{
   myAssert(logIndex > m_lastSnapshotIncludeIndex,
            format("[func-getSlicesIndexFromLogIndex-rf{%d}]  index{%d} <= rf.lastSnapshotIncludeIndex{%d}", m_me,
                   logIndex, m_lastSnapshotIncludeIndex));
@@ -759,18 +877,20 @@ int Raft::getSlicesIndexFromLogIndex(int logIndex) {
 }
 
 bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVoteArgs> args,
-                           std::shared_ptr<raftRpcProctoc::RequestVoteReply> reply, std::shared_ptr<int> votedNum) {
-  //这个ok是网络是否正常通信的ok，而不是requestVote rpc是否投票的rpc
-  // ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-  // todo
+                           std::shared_ptr<raftRpcProctoc::RequestVoteReply> reply, std::shared_ptr<int> votedNum)
+{
+  // 这个ok是网络是否正常通信的ok，而不是requestVote rpc是否投票的rpc
+  //  ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+  //  todo
   auto start = now();
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 開始", m_me, m_currentTerm, getLastLogIndex());
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 开始", m_me, m_currentTerm, getLastLogIndex());
   bool ok = m_peers[server]->RequestVote(args.get(), reply.get());
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 發送 RequestVote 完畢，耗時:{%d} ms", m_me, m_currentTerm,
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 完毕，耗时:{%d} ms", m_me, m_currentTerm,
           getLastLogIndex(), now() - start);
 
-  if (!ok) {
-    return ok;  //不知道为什么不加这个的话如果服务器宕机会出现问题的，通不过2B  todo
+  if (!ok)
+  {
+    return ok; // 不知道为什么不加这个的话如果服务器宕机会出现问题的，通不过2B  todo
   }
   // for !ok {
   //
@@ -779,30 +899,36 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
   //	//	break
   //	//}
   // } //这里是发送出去了，但是不能保证他一定到达
-  //对回应进行处理，要记得无论什么时候收到回复就要检查term
+  // 对回应进行处理，要记得无论什么时候收到回复就要检查term
   std::lock_guard<std::mutex> lg(m_mtx);
-  if (reply->term() > m_currentTerm) {
-    m_status = Follower;  //三变：身份，term，和投票
+  if (reply->term() > m_currentTerm)
+  {
+    m_status = Follower; // 三变：身份，term，和投票
     m_currentTerm = reply->term();
     m_votedFor = -1;
     persist();
     return true;
-  } else if (reply->term() < m_currentTerm) {
+  }
+  else if (reply->term() < m_currentTerm)
+  {
     return true;
   }
-  myAssert(reply->term() == m_currentTerm, format("assert {reply.Term==rf.currentTerm} fail"));
+  myAssert(reply->term() == m_currentTerm, "assert {reply.Term==rf.currentTerm} fail");
 
   // todo：这里没有按博客写
-  if (!reply->votegranted()) {
+  if (!reply->votegranted())
+  {
     return true;
   }
 
   *votedNum = *votedNum + 1;
-  if (*votedNum >= m_peers.size() / 2 + 1) {
-    //变成leader
+  if (*votedNum >= m_peers.size() / 2 + 1)
+  {
+    // 变成leader
     *votedNum = 0;
-    if (m_status == Leader) {
-      //如果已经是leader了，那么是就是了，不会进行下一步处理了k
+    if (m_status == Leader)
+    {
+      // 如果已经是leader了，那么是就是了，不会进行下一步处理了k
       myAssert(false,
                format("[func-sendRequestVote-rf{%d}]  term:{%d} 同一个term当两次领导，error", m_me, m_currentTerm));
     }
@@ -813,11 +939,12 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
             getLastLogIndex());
 
     int lastLogIndex = getLastLogIndex();
-    for (int i = 0; i < m_nextIndex.size(); i++) {
-      m_nextIndex[i] = lastLogIndex + 1;  //有效下标从1开始，因此要+1
-      m_matchIndex[i] = 0;                //每换一个领导都是从0开始，见fig2
+    for (int i = 0; i < m_nextIndex.size(); i++)
+    {
+      m_nextIndex[i] = lastLogIndex + 1; // 有效下标从1开始，因此要+1
+      m_matchIndex[i] = 0;               // 每换一个领导都是从0开始，见fig2
     }
-    std::thread t(&Raft::doHeartBeat, this);  //马上向其他节点宣告自己就是leader
+    std::thread t(&Raft::doHeartBeat, this); // 马上向其他节点宣告自己就是leader
     t.detach();
 
     persist();
@@ -827,63 +954,74 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
 
 bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendEntriesArgs> args,
                              std::shared_ptr<raftRpcProctoc::AppendEntriesReply> reply,
-                             std::shared_ptr<int> appendNums) {
-  //这个ok是网络是否正常通信的ok，而不是requestVote rpc是否投票的rpc
-  // 如果网络不通的话肯定是没有返回的，不用一直重试
-  // todo： paper中5.3节第一段末尾提到，如果append失败应该不断的retries ,直到这个log成功的被store
-  DPrintf("[func-Raft::sendAppendEntries-raft{%d}] leader 向节点{%d}发送AE rpc開始 ， args->entries_size():{%d}", m_me,
+                             std::shared_ptr<int> appendNums)
+{
+  // 这个ok是网络是否正常通信的ok，而不是requestVote rpc是否投票的rpc
+  //  如果网络不通的话肯定是没有返回的，不用一直重试
+  //  todo： paper中5.3节第一段末尾提到，如果append失败应该不断的retries ,直到这个log成功的被store
+  DPrintf("[func-Raft::sendAppendEntries-raft{%d}] leader 向节点{%d}发送AE rpc开始 ， args->entries_size():{%d}", m_me,
           server, args->entries_size());
   bool ok = m_peers[server]->AppendEntries(args.get(), reply.get());
 
-  if (!ok) {
+  if (!ok)
+  {
     DPrintf("[func-Raft::sendAppendEntries-raft{%d}] leader 向节点{%d}发送AE rpc失敗", m_me, server);
     return ok;
   }
   DPrintf("[func-Raft::sendAppendEntries-raft{%d}] leader 向节点{%d}发送AE rpc成功", m_me, server);
-  if (reply->appstate() == Disconnected) {
+  if (reply->appstate() == Disconnected)
+  {
     return ok;
   }
   std::lock_guard<std::mutex> lg1(m_mtx);
 
-  //对reply进行处理
-  // 对于rpc通信，无论什么时候都要检查term
-  if (reply->term() > m_currentTerm) {
+  // 对reply进行处理
+  //  对于rpc通信，无论什么时候都要检查term
+  if (reply->term() > m_currentTerm)
+  {
     m_status = Follower;
     m_currentTerm = reply->term();
     m_votedFor = -1;
     return ok;
-  } else if (reply->term() < m_currentTerm) {
+  }
+  else if (reply->term() < m_currentTerm)
+  {
     DPrintf("[func -sendAppendEntries  rf{%d}]  节点：{%d}的term{%d}<rf{%d}的term{%d}\n", m_me, server, reply->term(),
             m_me, m_currentTerm);
     return ok;
   }
 
-  if (m_status != Leader) {
-    //如果不是leader，那么就不要对返回的情况进行处理了
+  if (m_status != Leader)
+  {
+    // 如果不是leader，那么就不要对返回的情况进行处理了
     return ok;
   }
   // term相等
 
   myAssert(reply->term() == m_currentTerm,
            format("reply.Term{%d} != rf.currentTerm{%d}   ", reply->term(), m_currentTerm));
-  if (!reply->success()) {
-    //日志不匹配，正常来说就是index要往前-1，既然能到这里，第一个日志（idnex =
-    // 1）发送后肯定是匹配的，因此不用考虑变成负数 因为真正的环境不会知道是服务器宕机还是发生网络分区了
-    if (reply->updatenextindex() != -100) {
+  if (!reply->success())
+  {
+    // 日志不匹配，正常来说就是index要往前-1，既然能到这里，第一个日志（idnex =
+    //  1）发送后肯定是匹配的，因此不用考虑变成负数 因为真正的环境不会知道是服务器宕机还是发生网络分区了
+    if (reply->updatenextindex() != -100)
+    {
       // todo:待总结，就算term匹配，失败的时候nextIndex也不是照单全收的，因为如果发生rpc延迟，leader的term可能从不符合term要求
-      //变得符合term要求
-      //但是不能直接赋值reply.UpdateNextIndex
+      // 变得符合term要求
+      // 但是不能直接赋值reply.UpdateNextIndex
       DPrintf("[func -sendAppendEntries  rf{%d}]  返回的日志term相等，但是不匹配，回缩nextIndex[%d]：{%d}\n", m_me,
               server, reply->updatenextindex());
-      m_nextIndex[server] = reply->updatenextindex();  //失败是不更新mathIndex的
+      m_nextIndex[server] = reply->updatenextindex(); // 失败是不更新mathIndex的
     }
     //	怎么越写越感觉rf.nextIndex数组是冗余的呢，看下论文fig2，其实不是冗余的
-  } else {
+  }
+  else
+  {
     *appendNums = *appendNums + 1;
-    DPrintf("---------------------------tmp------------------------- 節點{%d}返回true,當前*appendNums{%d}", server,
+    DPrintf("---------------------------tmp------------------------- 节点{%d}返回true,当前*appendNums{%d}", server,
             *appendNums);
     // rf.matchIndex[server] = len(args.Entries) //只要返回一个响应就对其matchIndex应该对其做出反应，
-    //但是这么修改是有问题的，如果对某个消息发送了多遍（心跳时就会再发送），那么一条消息会导致n次上涨
+    // 但是这么修改是有问题的，如果对某个消息发送了多遍（心跳时就会再发送），那么一条消息会导致n次上涨
     m_matchIndex[server] = std::max(m_matchIndex[server], args->prevlogindex() + args->entries_size());
     m_nextIndex[server] = m_matchIndex[server] + 1;
     int lastLogIndex = getLastLogIndex();
@@ -891,23 +1029,26 @@ bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendE
     myAssert(m_nextIndex[server] <= lastLogIndex + 1,
              format("error msg:rf.nextIndex[%d] > lastLogIndex+1, len(rf.logs) = %d   lastLogIndex{%d} = %d", server,
                     m_logs.size(), server, lastLogIndex));
-    if (*appendNums >= 1 + m_peers.size() / 2) {
-      //可以commit了
-      //两种方法保证幂等性，1.赋值为0 	2.上面≥改为==
+    if (*appendNums >= 1 + m_peers.size() / 2)
+    {
+      // 可以commit了
+      // 两种方法保证幂等性，1.赋值为0 	2.上面≥改为==
 
       *appendNums = 0;
       // todo https://578223592-laughing-halibut-wxvpggvw69qh99q4.github.dev/ 不断遍历来统计rf.commitIndex
-      //改了好久！！！！！
+      // 改了好久！！！！！
       // leader只有在当前term有日志提交的时候才更新commitIndex，因为raft无法保证之前term的Index是否提交
-      //只有当前term有日志提交，之前term的log才可以被提交，只有这样才能保证“领导人完备性{当选领导人的节点拥有之前被提交的所有log，当然也可能有一些没有被提交的}”
+      // 只有当前term有日志提交，之前term的log才可以被提交，只有这样才能保证“领导人完备性{当选领导人的节点拥有之前被提交的所有log，当然也可能有一些没有被提交的}”
       // rf.leaderUpdateCommitIndex()
-      if (args->entries_size() > 0) {
+      if (args->entries_size() > 0)
+      {
         DPrintf("args->entries(args->entries_size()-1).logterm(){%d}   m_currentTerm{%d}",
                 args->entries(args->entries_size() - 1).logterm(), m_currentTerm);
       }
-      if (args->entries_size() > 0 && args->entries(args->entries_size() - 1).logterm() == m_currentTerm) {
+      if (args->entries_size() > 0 && args->entries(args->entries_size() - 1).logterm() == m_currentTerm)
+      {
         DPrintf(
-            "---------------------------tmp------------------------- 當前term有log成功提交，更新leader的m_commitIndex "
+            "---------------------------tmp------------------------- 当前term有log成功提交，更新leader的m_commitIndex "
             "from{%d} to{%d}",
             m_commitIndex, args->prevlogindex() + args->entries_size());
 
@@ -923,34 +1064,39 @@ bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendE
   return ok;
 }
 
-void Raft::AppendEntries(google::protobuf::RpcController* controller,
-                         const ::raftRpcProctoc::AppendEntriesArgs* request,
-                         ::raftRpcProctoc::AppendEntriesReply* response, ::google::protobuf::Closure* done) {
+void Raft::AppendEntries(google::protobuf::RpcController *controller,
+                         const ::raftRpcProctoc::AppendEntriesArgs *request,
+                         ::raftRpcProctoc::AppendEntriesReply *response, ::google::protobuf::Closure *done)
+{
   AppendEntries1(request, response);
   done->Run();
 }
 
-void Raft::InstallSnapshot(google::protobuf::RpcController* controller,
-                           const ::raftRpcProctoc::InstallSnapshotRequest* request,
-                           ::raftRpcProctoc::InstallSnapshotResponse* response, ::google::protobuf::Closure* done) {
+void Raft::InstallSnapshot(google::protobuf::RpcController *controller,
+                           const ::raftRpcProctoc::InstallSnapshotRequest *request,
+                           ::raftRpcProctoc::InstallSnapshotResponse *response, ::google::protobuf::Closure *done)
+{
   InstallSnapshot(request, response);
 
   done->Run();
 }
 
-void Raft::RequestVote(google::protobuf::RpcController* controller, const ::raftRpcProctoc::RequestVoteArgs* request,
-                       ::raftRpcProctoc::RequestVoteReply* response, ::google::protobuf::Closure* done) {
+void Raft::RequestVote(google::protobuf::RpcController *controller, const ::raftRpcProctoc::RequestVoteArgs *request,
+                       ::raftRpcProctoc::RequestVoteReply *response, ::google::protobuf::Closure *done)
+{
   RequestVote(request, response);
   done->Run();
 }
 
-void Raft::Start(Op command, int* newLogIndex, int* newLogTerm, bool* isLeader) {
+void Raft::Start(Op command, int *newLogIndex, int *newLogTerm, bool *isLeader)
+{
   std::lock_guard<std::mutex> lg1(m_mtx);
   //    m_mtx.lock();
   //    Defer ec1([this]()->void {
   //       m_mtx.unlock();
   //    });
-  if (m_status != Leader) {
+  if (m_status != Leader)
+  {
     DPrintf("[func-Start-rf{%d}]  is not leader");
     *newLogIndex = -1;
     *newLogTerm = -1;
@@ -986,7 +1132,8 @@ void Raft::Start(Op command, int* newLogIndex, int* newLogTerm, bool* isLeader) 
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
-                std::shared_ptr<LockQueue<ApplyMsg>> applyCh) {
+                std::shared_ptr<LockQueue<ApplyMsg>> applyCh)
+{
   m_peers = peers;
   m_persister = persister;
   m_me = me;
@@ -1001,7 +1148,8 @@ void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::sh
   m_commitIndex = 0;
   m_lastApplied = 0;
   m_logs.clear();
-  for (int i = 0; i < m_peers.size(); i++) {
+  for (int i = 0; i < m_peers.size(); i++)
+  {
     m_matchIndex.push_back(0);
     m_nextIndex.push_back(0);
   }
@@ -1014,7 +1162,8 @@ void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::sh
 
   // initialize from state persisted before a crash
   readPersist(m_persister->ReadRaftState());
-  if (m_lastSnapshotIncludeIndex > 0) {
+  if (m_lastSnapshotIncludeIndex > 0)
+  {
     m_lastApplied = m_lastSnapshotIncludeIndex;
     // rf.commitIndex = rf.lastSnapshotIncludeIndex   todo ：崩溃恢复为何不能读取commitIndex
   }
@@ -1030,8 +1179,10 @@ void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::sh
   // 启动三个循环定时器
   // todo:原来是启动了三个线程，现在是直接使用了协程，三个函数中leaderHearBeatTicker
   // 、electionTimeOutTicker执行时间是恒定的，applierTicker时间受到数据库响应延迟和两次apply之间请求数量的影响，这个随着数据量增多可能不太合理，最好其还是启用一个线程。
-  m_ioManager->scheduler([this]() -> void { this->leaderHearBeatTicker(); });
-  m_ioManager->scheduler([this]() -> void { this->electionTimeOutTicker(); });
+  m_ioManager->scheduler([this]() -> void
+                         { this->leaderHearBeatTicker(); });
+  m_ioManager->scheduler([this]() -> void
+                         { this->electionTimeOutTicker(); });
 
   std::thread t3(&Raft::applierTicker, this);
   t3.detach();
@@ -1046,13 +1197,15 @@ void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::sh
   // t3.detach();
 }
 
-std::string Raft::persistData() {
+std::string Raft::persistData()
+{
   BoostPersistRaftNode boostPersistRaftNode;
   boostPersistRaftNode.m_currentTerm = m_currentTerm;
   boostPersistRaftNode.m_votedFor = m_votedFor;
   boostPersistRaftNode.m_lastSnapshotIncludeIndex = m_lastSnapshotIncludeIndex;
   boostPersistRaftNode.m_lastSnapshotIncludeTerm = m_lastSnapshotIncludeTerm;
-  for (auto& item : m_logs) {
+  for (auto &item : m_logs)
+  {
     boostPersistRaftNode.m_logs.push_back(item.SerializeAsString());
   }
 
@@ -1062,8 +1215,10 @@ std::string Raft::persistData() {
   return ss.str();
 }
 
-void Raft::readPersist(std::string data) {
-  if (data.empty()) {
+void Raft::readPersist(std::string data)
+{
+  if (data.empty())
+  {
     return;
   }
   std::stringstream iss(data);
@@ -1077,32 +1232,36 @@ void Raft::readPersist(std::string data) {
   m_lastSnapshotIncludeIndex = boostPersistRaftNode.m_lastSnapshotIncludeIndex;
   m_lastSnapshotIncludeTerm = boostPersistRaftNode.m_lastSnapshotIncludeTerm;
   m_logs.clear();
-  for (auto& item : boostPersistRaftNode.m_logs) {
+  for (auto &item : boostPersistRaftNode.m_logs)
+  {
     raftRpcProctoc::LogEntry logEntry;
     logEntry.ParseFromString(item);
     m_logs.emplace_back(logEntry);
   }
 }
 
-void Raft::Snapshot(int index, std::string snapshot) {
+void Raft::Snapshot(int index, std::string snapshot)
+{
   std::lock_guard<std::mutex> lg(m_mtx);
 
-  if (m_lastSnapshotIncludeIndex >= index || index > m_commitIndex) {
+  if (m_lastSnapshotIncludeIndex >= index || index > m_commitIndex)
+  {
     DPrintf(
         "[func-Snapshot-rf{%d}] rejects replacing log with snapshotIndex %d as current snapshotIndex %d is larger or "
         "smaller ",
         m_me, index, m_lastSnapshotIncludeIndex);
     return;
   }
-  auto lastLogIndex = getLastLogIndex();  //为了检查snapshot前后日志是否一样，防止多截取或者少截取日志
+  auto lastLogIndex = getLastLogIndex(); // 为了检查snapshot前后日志是否一样，防止多截取或者少截取日志
 
-  //制造完此快照后剩余的所有日志
+  // 制造完此快照后剩余的所有日志
   int newLastSnapshotIncludeIndex = index;
   int newLastSnapshotIncludeTerm = m_logs[getSlicesIndexFromLogIndex(index)].logterm();
   std::vector<raftRpcProctoc::LogEntry> trunckedLogs;
   // todo :这种写法有点笨，待改进，而且有内存泄漏的风险
-  for (int i = index + 1; i <= getLastLogIndex(); i++) {
-    //注意有=，因为要拿到最后一个日志
+  for (int i = index + 1; i <= getLastLogIndex(); i++)
+  {
+    // 注意有=，因为要拿到最后一个日志
     trunckedLogs.push_back(m_logs[getSlicesIndexFromLogIndex(i)]);
   }
   m_lastSnapshotIncludeIndex = newLastSnapshotIncludeIndex;

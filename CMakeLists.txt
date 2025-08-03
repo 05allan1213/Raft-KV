@@ -29,17 +29,35 @@ endif()
 include_directories(${MUDUO_INCLUDE_DIR})
 
 # 4. Protobuf 代码生成 (针对测试)
-protobuf_generate_cpp(ECHO_PROTO_SRCS ECHO_PROTO_HDRS "tests/rpc/echo.proto")
+protobuf_generate_cpp(FRIEND_PROTO_SRCS FRIEND_PROTO_HDRS "tests/rpc/friend.proto")
+
+# 创建目录结构以匹配include路径
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/raft-kv/rpc)
+
+# 复制生成的friend.pb.h到正确的位置
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/raft-kv/rpc/friend.pb.h
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_BINARY_DIR}/friend.pb.h
+            ${CMAKE_CURRENT_BINARY_DIR}/raft-kv/rpc/friend.pb.h
+    DEPENDS ${FRIEND_PROTO_HDRS}
+    COMMENT "Copying friend.pb.h to raft-kv/rpc/ directory"
+)
 
 # 5. 包含子目录
 add_subdirectory(src)
 
 # 6. 定义所有测试用的可执行文件
 add_executable(fiber_test tests/fiber_test.cpp)
-add_executable(server tests/rpc/server.cpp ${ECHO_PROTO_SRCS})
-add_executable(client tests/rpc/client.cpp ${ECHO_PROTO_SRCS})
+add_executable(server tests/rpc/server.cpp ${FRIEND_PROTO_SRCS})
+add_executable(client tests/rpc/client.cpp ${FRIEND_PROTO_SRCS})
 add_executable(raft_test tests/raft_test.cpp)
+add_executable(raft_client tests/raft_client.cpp)
 
+# 确保friend.pb.h被复制到正确位置
+add_custom_target(copy_friend_pb_h DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/raft-kv/rpc/friend.pb.h)
+add_dependencies(server copy_friend_pb_h)
+add_dependencies(client copy_friend_pb_h)
 
 # 7. 设置测试目标的包含路径
 target_include_directories(server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
@@ -54,3 +72,4 @@ target_link_libraries(fiber_test PRIVATE raft-kv_lib)
 target_link_libraries(server PRIVATE raft-kv_lib)
 target_link_libraries(client PRIVATE raft-kv_lib)
 target_link_libraries(raft_test PRIVATE raft-kv_lib)
+target_link_libraries(raft_client PRIVATE raft-kv_lib)

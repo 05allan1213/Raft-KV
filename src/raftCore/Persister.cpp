@@ -1,19 +1,38 @@
 #include "Persister.h"
 #include "util.h"
 
-// todo:会涉及反复打开文件的操作，没有考虑如果文件出现问题会怎么办？？
+/**
+ * @brief 保存Raft状态和快照到本地文件
+ * 
+ * 将Raft状态数据和快照数据同时保存到本地文件中。
+ * 注意：会涉及反复打开文件的操作，没有考虑如果文件出现问题会怎么办？
+ * 
+ * @param raftstate Raft状态数据
+ * @param snapshot 快照数据
+ */
 void Persister::Save(const std::string raftstate, const std::string snapshot)
 {
   std::lock_guard<std::mutex> lg(m_mtx);
   clearRaftStateAndSnapshot();
+  
   // 将raftstate和snapshot写入本地文件
   m_raftStateOutStream << raftstate;
   m_snapshotOutStream << snapshot;
 }
 
+/**
+ * @brief 从本地文件读取快照数据
+ * 
+ * 从快照文件中读取之前保存的快照数据。
+ * 如果文件不存在或读取失败，返回空字符串。
+ * 
+ * @return 快照数据字符串
+ */
 std::string Persister::ReadSnapshot()
 {
   std::lock_guard<std::mutex> lg(m_mtx);
+  
+  // 如果输出流已打开，先关闭
   if (m_snapshotOutStream.is_open())
   {
     m_snapshotOutStream.close();
@@ -21,8 +40,10 @@ std::string Persister::ReadSnapshot()
 
   DEFER
   {
-    m_snapshotOutStream.open(m_snapshotFileName); // 默认是追加
+    m_snapshotOutStream.open(m_snapshotFileName); // 默认是追加模式
   };
+  
+  // 读取快照文件
   std::fstream ifs(m_snapshotFileName, std::ios_base::in);
   if (!ifs.good())
   {

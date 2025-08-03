@@ -1,26 +1,46 @@
 #include <iostream>
+#include <string>
+#include <vector>
 #include "raft-kv/rpc/rpcprovider.h"
-#include "echo.pb.h"
-#include <google/protobuf/service.h>
+#include "raft-kv/rpc/friend.pb.h"
 
-// 继承自 protobuf 生成的服务类
-class EchoServiceImpl : public echo::EchoService
+// 服务类，继承自 Protobuf 生成的 Service 类
+class FriendService : public fixbug::FriendServiceRpc
 {
 public:
-    // 重写 Echo 方法
-    virtual void Echo(google::protobuf::RpcController *controller,
-                      const echo::EchoRequest *request,
-                      echo::EchoResponse *response,
-                      google::protobuf::Closure *done)
+    // 实际的本地业务方法
+    std::vector<std::string> GetFriendsList(uint32_t userid)
+    {
+        std::cout << "[Server] Executing local method GetFriendsList for userid: " << userid << std::endl;
+        std::vector<std::string> friends;
+        friends.push_back("gao yang");
+        friends.push_back("liu hong");
+        friends.push_back("wang shuo");
+        return friends;
+    }
+
+    // 重写 Protobuf 生成的虚函数，用于响应 RPC 请求
+    void GetFriendsList(::google::protobuf::RpcController *controller,
+                        const ::fixbug::GetFriendsListRequest *request,
+                        ::fixbug::GetFriendsListResponse *response,
+                        ::google::protobuf::Closure *done) override
     {
 
-        std::string msg = request->message();
-        std::cout << "Server received: " << msg << std::endl;
+        // 1. 从 request 中获取参数
+        uint32_t userid = request->userid();
 
-        // 简单地将收到的消息加上 "echo: " 前缀返回
-        response->set_response("echo from server: " + msg);
+        // 2. 调用本地业务
+        std::vector<std::string> friendsList = GetFriendsList(userid);
 
-        // done->Run() 用于通知 RPC 框架，方法执行完毕
+        // 3. 填充 response
+        response->mutable_result()->set_errcode(0);
+        response->mutable_result()->set_errmsg("");
+        for (const std::string &name : friendsList)
+        {
+            response->add_friends(name);
+        }
+
+        // 4. 执行回调，完成 RPC 响应
         if (done)
         {
             done->Run();
@@ -28,18 +48,17 @@ public:
     }
 };
 
-int main()
+int main(int argc, char **argv)
 {
-    // 创建一个 RpcProvider
+    // 1. 创建 RpcProvider
     RpcProvider provider;
 
-    // 注册我们自己实现的服务
-    provider.NotifyService(new EchoServiceImpl());
+    // 2. 注册服务
+    provider.NotifyService(new FriendService());
 
-    // 启动服务，监听在所有网络接口的 8888 端口上
-    // 提供了两个参数：节点索引（这里用 0 作为示例）和端口号
-    std::cout << "Starting RPC server on port 8888..." << std::endl;
-    provider.Run(0, 8888);
+    // 3. 启动服务，监听在 127.0.1.1:7788
+    // provider.Run(nodeIndex, port)
+    provider.Run(1, 7788);
 
     return 0;
 }

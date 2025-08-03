@@ -1,37 +1,52 @@
 #include <iostream>
 #include "raft-kv/rpc/mprpcchannel.h"
-#include "echo.pb.h"
-#include <google/protobuf/service.h>
+#include "raft-kv/rpc/mprpccontroller.h"
+#include "raft-kv/rpc/friend.pb.h"
 
-int main()
+int main(int argc, char **argv)
 {
-    // 创建一个 RPC 通道，并指定要连接的服务器 IP 和端口
-    // 提供了三个参数：IP, 端口, 是否立即连接（通常为 true）
-    MprpcChannel channel("127.0.1.1", 8888, true);
+    std::string ip = "127.0.1.1";
+    short port = 7788;
 
-    // 使用通道创建一个 stub (服务存根)
-    echo::EchoService_Stub stub(&channel);
+    // 1. 创建一个 RPC 通道
+    MprpcChannel channel(ip, port, true);
 
-    // 准备请求参数
-    echo::EchoRequest request;
-    request.set_message("Hello, RPC!");
+    // 2. 使用通道创建一个 Stub (服务存根)
+    fixbug::FriendServiceRpc_Stub stub(&channel);
 
-    // 准备接收响应
-    echo::EchoResponse response;
+    // 3. 准备请求和响应对象
+    fixbug::GetFriendsListRequest request;
+    request.set_userid(12345);
+    fixbug::GetFriendsListResponse response;
 
-    std::cout << "Sending RPC request..." << std::endl;
+    // 4. 创建控制器
+    MprpcController controller;
 
-    // 发起 RPC 调用，同步等待结果
-    stub.Echo(nullptr, &request, &response, nullptr);
+    std::cout << "[Client] Sending RPC request to " << ip << ":" << port << std::endl;
 
-    // 检查结果
-    if (response.response().empty())
+    // 5. 发起同步 RPC 调用
+    stub.GetFriendsList(&controller, &request, &response, nullptr);
+
+    // 6. 检查结果
+    if (controller.Failed())
     {
-        std::cout << "RPC call failed!" << std::endl;
+        std::cerr << "[Client] RPC call failed: " << controller.ErrorText() << std::endl;
     }
     else
     {
-        std::cout << "Client received: " << response.response() << std::endl;
+        if (response.result().errcode() == 0)
+        {
+            std::cout << "[Client] RPC call success!" << std::endl;
+            std::cout << "Friends list:" << std::endl;
+            for (int i = 0; i < response.friends_size(); ++i)
+            {
+                std::cout << "  - " << response.friends(i) << std::endl;
+            }
+        }
+        else
+        {
+            std::cerr << "[Client] Business logic error: " << response.result().errmsg() << std::endl;
+        }
     }
 
     return 0;

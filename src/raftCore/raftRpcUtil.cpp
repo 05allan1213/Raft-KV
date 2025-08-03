@@ -1,7 +1,7 @@
 #include "raftRpcUtil.h"
 
-#include <mprpcchannel.h>
-#include <mprpccontroller.h>
+#include "raft-kv/rpc/mprpcchannel.h"
+#include "raft-kv/rpc/mprpccontroller.h"
 
 bool RaftRpcUtil::AppendEntries(raftRpcProctoc::AppendEntriesArgs *args, raftRpcProctoc::AppendEntriesReply *response)
 {

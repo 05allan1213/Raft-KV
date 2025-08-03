@@ -1,16 +1,17 @@
-//
-// Created by swx on 24-1-5.
-//
+/**
+ * @file skipList.h
+ * @brief 跳表数据结构实现
+ * 
+ * 该文件实现了跳表（Skip List）数据结构，用于高效地存储和检索键值对。
+ * 跳表是一种概率性数据结构，具有对数级别的查找、插入和删除复杂度。
+ * 
+ * @author 程序员Carl
+ * @date 2018-12-02
+ * @version 1.0
+ */
 
 #ifndef SKIPLIST_H
 #define SKIPLIST_H
-/* ************************************************************************
-> File Name:     skiplist.h
-> Author:        程序员Carl
-> 微信公众号:    代码随想录
-> Created Time:  Sun Dec  2 19:04:26 2018
-> Description:
- ************************************************************************/
 
 #include <cmath>
 #include <cstdlib>
@@ -21,9 +22,16 @@
 
 #define STORE_FILE "store/dumpFile"
 
-static std::string delimiter = ":";
+static std::string delimiter = ":"; // 键值对分隔符
 
-// Class template to implement node
+/**
+ * @brief 跳表节点类模板
+ * 
+ * 跳表中的每个节点都包含一个键值对，以及指向不同层级下一个节点的指针数组。
+ * 
+ * @tparam K 键的类型
+ * @tparam V 值的类型
+ */
 template <typename K, typename V>
 class Node {
  public:
