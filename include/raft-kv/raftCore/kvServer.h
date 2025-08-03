@@ -21,6 +21,7 @@
 #include "raft-kv/raftCore/raft.h"
 #include "raft-kv/raftCore/StreamingSnapshot.h"
 #include "raft-kv/skipList/skipList.h"
+#include "raft-kv/fiber/channel.h"
 
 /**
  * @brief KV存储服务器类
@@ -278,22 +279,24 @@ private:
   }
 
 private:
-  std::mutex m_mtx;                               // 互斥锁，保护共享数据
-  int m_me;                                       // 服务器ID
-  std::shared_ptr<Raft> m_raftNode;               // Raft节点
-  std::shared_ptr<LockQueue<ApplyMsg>> applyChan; // kvServer和raft节点的通信管道
-  int m_maxRaftState;                             // 快照阈值，如果日志增长超过这个大小就制作快照
+  std::mutex m_mtx;                          // 互斥锁，保护共享数据
+  int m_me;                                  // 服务器ID
+  std::shared_ptr<Raft> m_raftNode;          // Raft节点
+  monsoon::Channel<ApplyMsg>::ptr applyChan; // kvServer和raft节点的通信管道（使用Channel替代LockQueue）
+  int m_maxRaftState;                        // 快照阈值，如果日志增长超过这个大小就制作快照
 
   // 数据存储相关
   std::string m_serializedKVData;                      // 序列化后的kv数据，理论上可以不用，但是目前没有找到特别好的替代方法
   SkipList<std::string, std::string> m_skipList;       // 跳表，用于存储键值对
   std::unordered_map<std::string, std::string> m_kvDB; // 哈希表，用于存储键值对
 
-  // 等待机制优化：支持两种模式
-  std::unordered_map<int, LockQueue<Op> *> waitApplyCh; // 原有的 LockQueue 模式（向后兼容）
-  PromiseFutureManager<Op> promiseManager_;             // 新的 Promise/Future 模式
-  LockQueuePool<Op> lockQueuePool_;                     // LockQueue 对象池
-  bool usePromiseFuture_;                               // 是否使用 Promise/Future 模式
+  // 等待机制优化：支持三种模式
+  std::unordered_map<int, LockQueue<Op> *> waitApplyCh;                  // 原有的 LockQueue 模式（向后兼容）
+  std::unordered_map<int, monsoon::Channel<Op>::ptr> waitApplyChChannel; // 新的 Channel 模式
+  PromiseFutureManager<Op> promiseManager_;                              // Promise/Future 模式
+  LockQueuePool<Op> lockQueuePool_;                                      // LockQueue 对象池
+  bool usePromiseFuture_;                                                // 是否使用 Promise/Future 模式
+  bool useChannel_;                                                      // 是否使用 Channel 模式
 
   std::unordered_map<std::string, int> m_lastRequestId; // clientid -> requestID，一个kV服务器可能连接多个client
 

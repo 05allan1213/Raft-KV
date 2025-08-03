@@ -12,3 +12,4 @@
 #include "iomanager.h"  // IO管理器
 #include "thread.h"     // 线程封装
 #include "utils.h"      // 工具函数
+#include "channel.h"    // 协程通信Channel

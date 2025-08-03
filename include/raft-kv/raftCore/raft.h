@@ -19,6 +19,7 @@
 #include "boost/serialization/serialization.hpp"
 #include "raft-kv/common/config.h"
 #include "raft-kv/fiber/monsoon.h"
+#include "raft-kv/fiber/channel.h"
 #include "raft-kv/raftCore/raftRpcUtil.h"
 #include "raft-kv/common/util.h"
 
@@ -95,7 +96,7 @@ private:
 
   Status m_status; // 当前节点状态
 
-  std::shared_ptr<LockQueue<ApplyMsg>> applyChan; // 客户端从这里取日志，client与raft通信的接口
+  monsoon::Channel<ApplyMsg>::ptr applyChan; // 客户端从这里取日志，client与raft通信的接口（使用Channel替代LockQueue）
 
   // 选举超时相关
   std::chrono::_V2::system_clock::time_point m_lastResetElectionTime; // 上次重置选举超时的时间点
@@ -396,7 +397,7 @@ public:
    * @param applyCh 应用通道
    */
   void init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
-            std::shared_ptr<LockQueue<ApplyMsg>> applyCh);
+            monsoon::Channel<ApplyMsg>::ptr applyCh);
 
   /**
    * @brief 设置状态大小变化回调函数

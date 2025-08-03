@@ -210,7 +210,11 @@ void Raft::applierTicker()
     // 将待应用的日志消息推送到应用通道
     for (auto &message : applyMsgs)
     {
-      applyChan->Push(message);
+      auto result = applyChan->send(message);
+      if (result != monsoon::ChannelResult::SUCCESS)
+      {
+        DPrintf("[Raft::applier] 发送ApplyMsg失败，结果: %d", (int)result);
+      }
     }
 
     // 休眠一段时间后继续检查
@@ -578,7 +582,14 @@ void Raft::InstallSnapshot(const raftRpcProctoc::InstallSnapshotRequest *args,
   m_persister->Save(persistData(), args->data());
 }
 
-void Raft::pushMsgToKvServer(ApplyMsg msg) { applyChan->Push(msg); }
+void Raft::pushMsgToKvServer(ApplyMsg msg)
+{
+  auto result = applyChan->send(msg);
+  if (result != monsoon::ChannelResult::SUCCESS)
+  {
+    DPrintf("[Raft::pushMsgToKvServer] 发送ApplyMsg失败，结果: %d", (int)result);
+  }
+}
 
 void Raft::leaderHearBeatTicker()
 {
@@ -1233,7 +1244,7 @@ void Raft::Start(Op command, int *newLogIndex, int *newLogTerm, bool *isLeader)
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 void Raft::init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
-                std::shared_ptr<LockQueue<ApplyMsg>> applyCh)
+                monsoon::Channel<ApplyMsg>::ptr applyCh)
 {
   m_peers = peers;
   m_persister = persister;

@@ -328,8 +328,19 @@ void KvServer::ReadRaftApplyCommandLoop()
 {
   while (true)
   {
-    // 如果只操作applyChan不用拿锁，因为applyChan自己带锁
-    auto message = applyChan->Pop(); // 阻塞弹出
+    // 使用Channel接收消息，自动协程调度
+    ApplyMsg message;
+    auto result = applyChan->receive(message); // 阻塞接收
+    if (result != monsoon::ChannelResult::SUCCESS)
+    {
+      // Channel可能已关闭或出现错误
+      if (result == monsoon::ChannelResult::CLOSED)
+      {
+        DPrintf("[func-KvServer::ReadRaftApplyCommandLoop()-kvserver{%d}] applyChan已关闭，退出循环", m_me);
+        break;
+      }
+      continue; // 其他错误，继续尝试
+    }
     DPrintf(
         "---------------tmp-------------[func-KvServer::ReadRaftApplyCommandLoop()-kvserver{%d}] 收到了下raft的消息",
         m_me);
@@ -389,6 +400,30 @@ bool KvServer::SendMessageToWaitChan(const Op &op, int raftIndex)
       DPrintf("[SendMessageToWaitChan] Promise/Future mode: Successfully set result for index %d", raftIndex);
     }
     return success;
+  }
+  else if (useChannel_)
+  {
+    // 使用新的 Channel 模式
+    std::lock_guard<std::mutex> lg(m_mtx);
+
+    if (waitApplyChChannel.find(raftIndex) == waitApplyChChannel.end())
+    {
+      return false;
+    }
+    auto result = waitApplyChChannel[raftIndex]->send(op);
+    if (result == monsoon::ChannelResult::SUCCESS)
+    {
+      DPrintf(
+          "[RaftApplyMessageSendToWaitChan--> raftserver{%d}] , Send Command via Channel --> Index:{%d} , ClientId {%d}, RequestId "
+          "{%d}, Opreation {%v}, Key :{%v}, Value :{%v}",
+          m_me, raftIndex, &op.ClientId, op.RequestId, &op.Operation, &op.Key, &op.Value);
+      return true;
+    }
+    else
+    {
+      DPrintf("[RaftApplyMessageSendToWaitChan] Channel send failed, result: %d", (int)result);
+      return false;
+    }
   }
   else
   {
@@ -574,14 +609,15 @@ KvServer::KvServer(int me, int maxraftstate, std::string nodeInforFileName, shor
   m_maxRaftState = maxraftstate;
 
   // 初始化优化相关变量
-  usePromiseFuture_ = true;                          // 默认使用优化的 Promise/Future 模式
+  usePromiseFuture_ = false;                         // 暂时关闭Promise/Future模式
+  useChannel_ = true;                                // 默认使用Channel模式
   m_raftStateSize.store(persister->RaftStateSize()); // 从持久化存储中读取初始状态大小
   m_lastSnapshotTime = std::chrono::steady_clock::now();
 
   // 初始化流式快照管理器
   m_streamingSnapshotManager = std::make_unique<StreamingSnapshotManager>(me);
 
-  applyChan = std::make_shared<LockQueue<ApplyMsg>>();
+  applyChan = monsoon::createChannel<ApplyMsg>(100); // 使用Channel替代LockQueue，缓冲区大小100
 
   m_raftNode = std::make_shared<Raft>();
   ////////////////clerk层面 kvserver开启rpc接受功能
@@ -672,6 +708,36 @@ bool KvServer::WaitForRaftCommitOptimized(const Op &op, int raftIndex, int timeo
       // 超时或失败，清理等待句柄
       promiseManager_.removeWaitHandle(raftIndex);
     }
+
+    return success;
+  }
+  else if (useChannel_)
+  {
+    // 使用新的 Channel 模式
+    m_mtx.lock();
+
+    monsoon::Channel<Op>::ptr chForRaftIndex;
+    if (waitApplyChChannel.find(raftIndex) == waitApplyChChannel.end())
+    {
+      // 创建新的 Channel
+      chForRaftIndex = monsoon::createChannel<Op>(1); // 缓冲区大小为1
+      waitApplyChChannel[raftIndex] = chForRaftIndex;
+    }
+    else
+    {
+      chForRaftIndex = waitApplyChChannel[raftIndex];
+    }
+
+    m_mtx.unlock();
+
+    // 等待结果
+    auto channelResult = chForRaftIndex->receive(*result, timeoutMs);
+    bool success = (channelResult == monsoon::ChannelResult::SUCCESS);
+
+    // 清理
+    m_mtx.lock();
+    waitApplyChChannel.erase(raftIndex);
+    m_mtx.unlock();
 
     return success;
   }
