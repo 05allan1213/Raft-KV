@@ -192,19 +192,20 @@ void Raft::applierTicker()
   while (true)
   {
     m_mtx.lock();
-    if (m_status == Leader)
+    auto applyMsgs = getApplyLogs();
+    // 只在有日志需要应用时才输出调试信息
+    if (!applyMsgs.empty() && m_status == Leader)
     {
       DPrintf("[Raft::applierTicker() - raft{%d}]  m_lastApplied{%d}   m_commitIndex{%d}", m_me, m_lastApplied,
               m_commitIndex);
     }
-    auto applyMsgs = getApplyLogs();
     m_mtx.unlock();
 
     // 使用匿名函数是因为传递管道的时候不用拿锁
     // 好像必须拿锁，因为不拿锁的话如果调用多次applyLog函数，可能会导致应用的顺序不一样
     if (!applyMsgs.empty())
     {
-      DPrintf("[func- Raft::applierTicker()-raft{%d}] 向kvserver報告的applyMsgs長度爲：{%d}", m_me, applyMsgs.size());
+      DPrintf("[func- Raft::applierTicker()-raft{%d}] 向kvserver报告的applyMsgs长度为：{%d}", m_me, applyMsgs.size());
     }
 
     // 将待应用的日志消息推送到应用通道
@@ -250,6 +251,35 @@ void Raft::doElection()
     std::shared_ptr<int> votedNum = std::make_shared<int>(1); // 使用 make_shared 函数初始化 !! 亮点
     //	重新设置定时器
     m_lastResetElectionTime = now();
+
+    // 特殊处理：单节点集群直接成为领导者
+    if (m_peers.size() == 1)
+    {
+      m_status = Leader;
+      DPrintf("[func-Raft::doElection rf{%d}] 单节点集群，直接成为领导者，term:{%d}\n", m_me, m_currentTerm);
+
+      // 初始化领导者状态
+      int lastLogIndex = getLastLogIndex();
+      for (int i = 0; i < m_nextIndex.size(); i++)
+      {
+        m_nextIndex[i] = lastLogIndex + 1;
+        m_matchIndex[i] = 0;
+      }
+
+      // 开始发送心跳
+      if (m_ioManager)
+      {
+        m_ioManager->scheduler([this]()
+                               { this->doHeartBeat(); });
+      }
+      else
+      {
+        std::thread t(&Raft::doHeartBeat, this);
+        t.detach();
+      }
+      return; // 直接返回，不需要发送RequestVote
+    }
+
     //	发布RequestVote RPC
     for (int i = 0; i < m_peers.size(); i++)
     {
@@ -376,6 +406,10 @@ void Raft::doHeartBeat()
         t.detach();
       }
     }
+
+    // 更新提交索引（特别重要：确保单节点集群的日志能被提交）
+    leaderUpdateCommitIndex();
+
     m_lastResetHearBeatTime = now(); // leader发送心跳，就不是随机时间了
   }
 }
@@ -684,9 +718,20 @@ void Raft::leaderSendSnapShot(int server)
 
 void Raft::leaderUpdateCommitIndex()
 {
+  // 特殊处理：单节点集群直接提交所有日志
+  if (m_peers.size() == 1)
+  {
+    int lastIndex = getLastLogIndex();
+    if (lastIndex > m_commitIndex)
+    {
+      m_commitIndex = lastIndex;
+      DPrintf("[单节点集群] 直接提交所有日志，commitIndex更新为: %d", m_commitIndex);
+    }
+    return;
+  }
+
+  // 多节点集群的原有逻辑
   m_commitIndex = m_lastSnapshotIncludeIndex;
-  // for index := rf.commitIndex+1;index < len(rf.log);index++ {
-  // for index := rf.getLastIndex();index>=rf.commitIndex+1;index--{
   for (int index = getLastLogIndex(); index >= m_lastSnapshotIncludeIndex + 1; index--)
   {
     int sum = 0;
@@ -703,17 +748,12 @@ void Raft::leaderUpdateCommitIndex()
       }
     }
 
-    //        !!!只有当前term有新提交的，才会更新commitIndex！！！！
-    // log.Printf("lastSSP:%d, index: %d, commitIndex: %d, lastIndex: %d",rf.lastSSPointIndex, index, rf.commitIndex,
-    // rf.getLastIndex())
     if (sum >= m_peers.size() / 2 + 1 && getLogTermFromLogIndex(index) == m_currentTerm)
     {
       m_commitIndex = index;
       break;
     }
   }
-  //    DPrintf("[func-leaderUpdateCommitIndex()-rf{%v}] Leader %d(term%d) commitIndex
-  //    %d",rf.me,rf.me,rf.currentTerm,rf.commitIndex)
 }
 
 // 进来前要保证logIndex是存在的，即≥rf.lastSnapshotIncludeIndex	，而且小于等于rf.getLastLogIndex()
@@ -940,10 +980,10 @@ bool Raft::sendRequestVote(int server, std::shared_ptr<raftRpcProctoc::RequestVo
   //  ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
   //  todo
   auto start = now();
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 开始", m_me, m_currentTerm, getLastLogIndex());
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 开始", m_me, server);
   bool ok = m_peers[server]->RequestVote(args.get(), reply.get());
-  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 完毕，耗时:{%d} ms", m_me, m_currentTerm,
-          getLastLogIndex(), now() - start);
+  DPrintf("[func-sendRequestVote rf{%d}] 向server{%d} 发送 RequestVote 完毕，耗时:{%ld} ms", m_me, server,
+          std::chrono::duration_cast<std::chrono::milliseconds>(now() - start).count());
 
   if (!ok)
   {
@@ -1105,7 +1145,8 @@ bool Raft::sendAppendEntries(int server, std::shared_ptr<raftRpcProctoc::AppendE
       // 改了好久！！！！！
       // leader只有在当前term有日志提交的时候才更新commitIndex，因为raft无法保证之前term的Index是否提交
       // 只有当前term有日志提交，之前term的log才可以被提交，只有这样才能保证“领导人完备性{当选领导人的节点拥有之前被提交的所有log，当然也可能有一些没有被提交的}”
-      // rf.leaderUpdateCommitIndex()
+      // 修复：启用领导者提交索引更新
+      leaderUpdateCommitIndex();
       if (args->entries_size() > 0)
       {
         DPrintf("args->entries(args->entries_size()-1).logterm(){%d}   m_currentTerm{%d}",
@@ -1225,7 +1266,7 @@ void Raft::Start(Op command, int *newLogIndex, int *newLogTerm, bool *isLeader)
   int lastLogIndex = getLastLogIndex();
 
   // leader应该不停的向各个Follower发送AE来维护心跳和保持日志同步，目前的做法是新的命令来了不会直接执行，而是等待leader的心跳触发
-  DPrintf("[func-Start-rf{%d}]  lastLogIndex:%d,command:%s\n", m_me, lastLogIndex, &command);
+  DPrintf("[func-Start-rf{%d}]  lastLogIndex:%d,command:%s", m_me, lastLogIndex, command.asString().c_str());
   // rf.timer.Reset(10) //接收到命令后马上给follower发送,改成这样不知为何会出现问题，待修正 todo
   persist();
   *newLogIndex = newLogEntry.logindex();

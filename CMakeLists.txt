@@ -54,16 +54,26 @@ add_executable(server tests/rpc/server.cpp ${FRIEND_PROTO_SRCS})
 add_executable(client tests/rpc/client.cpp ${FRIEND_PROTO_SRCS})
 add_executable(raft_test tests/raft_test.cpp)
 add_executable(raft_client tests/raft_client.cpp)
+add_executable(integration_test tests/integration_test.cpp ${FRIEND_PROTO_SRCS})
 
 # 确保friend.pb.h被复制到正确位置
 add_custom_target(copy_friend_pb_h DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/raft-kv/rpc/friend.pb.h)
 add_dependencies(server copy_friend_pb_h)
 add_dependencies(client copy_friend_pb_h)
+add_dependencies(integration_test copy_friend_pb_h)
 
 # 7. 设置测试目标的包含路径
 target_include_directories(server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(client PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(raft_test PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}      # 用于找到 .pb.h 文件
+    ${CMAKE_SOURCE_DIR}/include     # 用于找到项目的所有头文件
+)
+target_include_directories(raft_client PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}      # 用于找到 .pb.h 文件
+    ${CMAKE_SOURCE_DIR}/include     # 用于找到项目的所有头文件
+)
+target_include_directories(integration_test PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}      # 用于找到 .pb.h 文件
     ${CMAKE_SOURCE_DIR}/include     # 用于找到项目的所有头文件
 )
@@ -74,6 +84,7 @@ target_link_libraries(server PRIVATE raft-kv_lib)
 target_link_libraries(client PRIVATE raft-kv_lib)
 target_link_libraries(raft_test PRIVATE raft-kv_lib)
 target_link_libraries(raft_client PRIVATE raft-kv_lib)
+target_link_libraries(integration_test PRIVATE raft-kv_lib)
 
 # 9. Google Test 单元测试配置
 enable_testing()

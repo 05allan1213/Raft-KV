@@ -128,8 +128,8 @@ void DPrintf(const char *format, ...)
     va_list args;           // 声明可变参数列表
     va_start(args, format); // 初始化可变参数
 
-    // 打印时间戳：年-月-日-时-分-秒
-    std::printf("[%d-%d-%d-%d-%d-%d] ",
+    // 打印时间戳：年-月-日 时:分:秒
+    std::printf("[%04d-%02d-%02d %02d:%02d:%02d] ",
                 nowtm->tm_year + 1900, // 年份（需要加1900）
                 nowtm->tm_mon + 1,     // 月份（需要加1，因为tm_mon从0开始）
                 nowtm->tm_mday,        // 日期

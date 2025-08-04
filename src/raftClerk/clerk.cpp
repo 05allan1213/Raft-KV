@@ -4,6 +4,9 @@
 #include "util.h"
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
+#include <stdexcept>
 
 /**
  * @brief 获取键对应的值
@@ -27,35 +30,46 @@ std::string Clerk::Get(std::string key)
   args.set_clientid(m_clientId);
   args.set_requestid(requestId);
 
-  // 循环重试，直到成功获取值或确认键不存在
-  while (true)
+  // 简化重试逻辑，最多重试3次
+  for (int retry = 0; retry < 3; retry++)
   {
     raftKVRpcProctoc::GetReply reply;
     bool ok = m_servers[server]->Get(&args, &reply);
 
-    // 如果RPC调用失败或返回错误领导者，尝试下一个服务器
-    if (!ok || reply.err() == ErrWrongLeader)
+    DPrintf("[客户端] Get操作尝试 %d/3，服务器: %d，RPC结果: %s",
+            retry + 1, server, ok ? "成功" : "失败");
+
+    if (ok)
     {
-      // 会一直重试，因为requestId没有改变，因此可能会因为RPC的丢失或者其他情况导致重试，
-      // kvserver层来保证不重复执行（线性一致性）
-      server = (server + 1) % m_servers.size();
-      continue;
+      if (reply.err() == OK)
+      {
+        DPrintf("[客户端] Get操作成功，键: %s，值: %s", key.c_str(), reply.value().c_str());
+        m_recentLeaderId = server;
+        return reply.value();
+      }
+      else if (reply.err() == ErrNoKey)
+      {
+        DPrintf("[客户端] 键不存在: %s", key.c_str());
+        m_recentLeaderId = server;
+        return ""; // 键不存在，返回空字符串
+      }
+      else if (reply.err() == ErrWrongLeader)
+      {
+        DPrintf("[客户端] 服务器%d不是领导者，尝试下一个服务器", server);
+        server = (server + 1) % m_servers.size();
+      }
+      else
+      {
+        DPrintf("[客户端] 服务器返回错误: %s", reply.err().c_str());
+      }
     }
 
-    // 如果键不存在，返回空字符串
-    if (reply.err() == ErrNoKey)
-    {
-      return "";
-    }
-
-    // 如果操作成功，更新领导者ID并返回值
-    if (reply.err() == OK)
-    {
-      m_recentLeaderId = server;
-      return reply.value();
-    }
+    // 延迟后重试，让日志输出更慢
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
   }
-  return "";
+
+  // 所有重试都失败了
+  throw std::runtime_error("Get操作失败：无法连接到Raft集群");
 }
 
 /**
@@ -75,8 +89,8 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op)
   auto requestId = m_requestId;
   auto server = m_recentLeaderId;
 
-  // 循环重试，直到操作成功
-  while (true)
+  // 简化重试逻辑，最多重试3次
+  for (int retry = 0; retry < 3; retry++)
   {
     // 构造Put/Append请求参数
     raftKVRpcProctoc::PutAppendArgs args;
@@ -90,31 +104,34 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op)
     raftKVRpcProctoc::PutAppendReply reply;
     bool ok = m_servers[server]->PutAppend(&args, &reply);
 
-    // 如果RPC调用失败或返回错误领导者，尝试下一个服务器
-    if (!ok || reply.err() == ErrWrongLeader)
+    DPrintf("[客户端] %s操作尝试 %d/3，服务器: %d，RPC结果: %s",
+            op.c_str(), retry + 1, server, ok ? "成功" : "失败");
+
+    if (ok)
     {
-      DPrintf("【Clerk::PutAppend】原以为的leader：{%d}请求失败，向新leader{%d}重试  ，操作：{%s}", server, server + 1,
-              op.c_str());
-      if (!ok)
+      if (reply.err() == OK)
       {
-        DPrintf("重试原因 ，rpc失敗 ，");
+        DPrintf("[客户端] %s操作成功完成，键: %s", op.c_str(), key.c_str());
+        m_recentLeaderId = server;
+        return;
       }
-      if (reply.err() == ErrWrongLeader)
+      else if (reply.err() == ErrWrongLeader)
       {
-        DPrintf("重試原因：非leader");
+        DPrintf("[客户端] 服务器%d不是领导者，尝试下一个服务器", server);
+        server = (server + 1) % m_servers.size();
       }
-      server = (server + 1) % m_servers.size(); // 尝试下一个服务器
-      continue;
+      else
+      {
+        DPrintf("[客户端] 服务器返回错误: %s", reply.err().c_str());
+      }
     }
 
-    // 如果操作成功，更新领导者ID并返回
-    if (reply.err() == OK)
-    {
-      // 什么时候reply errno为ok呢？？？
-      m_recentLeaderId = server;
-      return;
-    }
+    // 延迟后重试，让日志输出更慢
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
   }
+
+  // 所有重试都失败了
+  throw std::runtime_error(op + "操作失败：无法连接到Raft集群");
 }
 
 /**
