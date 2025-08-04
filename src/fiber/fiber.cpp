@@ -189,6 +189,28 @@ namespace monsoon
   }
 
   /**
+   * @brief 获取当前协程ID
+   * @return 当前协程的ID
+   */
+  uint64_t Fiber::GetCurFiberID()
+  {
+    if (cur_fiber)
+    {
+      return cur_fiber->getId();
+    }
+    return 0;
+  }
+
+  /**
+   * @brief 获取协程总数
+   * @return 当前系统中协程的总数
+   */
+  uint64_t Fiber::TotalFiberNum()
+  {
+    return fiber_count;
+  }
+
+  /**
    * @brief 析构函数
    * @details 释放协程资源，包括栈空间
    */

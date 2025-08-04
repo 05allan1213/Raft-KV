@@ -48,7 +48,7 @@ add_custom_command(
 # 5. 包含子目录
 add_subdirectory(src)
 
-# 6. 定义所有测试用的可执行文件
+# 6. 定义所有测试用的可执行文件（保留原有的集成测试）
 add_executable(fiber_test tests/fiber_test.cpp)
 add_executable(server tests/rpc/server.cpp ${FRIEND_PROTO_SRCS})
 add_executable(client tests/rpc/client.cpp ${FRIEND_PROTO_SRCS})
@@ -74,3 +74,33 @@ target_link_libraries(server PRIVATE raft-kv_lib)
 target_link_libraries(client PRIVATE raft-kv_lib)
 target_link_libraries(raft_test PRIVATE raft-kv_lib)
 target_link_libraries(raft_client PRIVATE raft-kv_lib)
+
+# 9. Google Test 单元测试配置
+enable_testing()
+
+# 定义单元测试可执行文件
+add_executable(unit_tests
+    unit_tests/main.cpp
+    unit_tests/raft_test.cpp
+    unit_tests/fiber_test.cpp
+    unit_tests/kvserver_test.cpp
+    unit_tests/utils_test.cpp
+)
+
+# 设置单元测试的包含路径
+target_include_directories(unit_tests PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}      # 用于找到 .pb.h 文件
+    ${CMAKE_SOURCE_DIR}/include     # 用于找到项目的所有头文件
+    ${CMAKE_SOURCE_DIR}/unit_tests  # 用于找到测试头文件
+)
+
+# 链接单元测试
+target_link_libraries(unit_tests PRIVATE
+    raft-kv_lib
+    GTest::gtest
+    GTest::gtest_main
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
+# 添加测试到 CTest
+add_test(NAME UnitTests COMMAND unit_tests)
