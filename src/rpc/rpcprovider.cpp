@@ -281,6 +281,73 @@ void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr &conn, goog
 }
 
 /**
+ * @brief 启动RPC服务节点（指定IP地址）
+ * @param ip 服务IP地址
+ * @param port 服务端口
+ *
+ * 启动rpc服务节点，使用指定的IP地址，避免自动检测IP导致的地址不匹配问题
+ */
+void RpcProvider::Run(const std::string &ip, short port)
+{
+  // 创建服务器地址
+  muduo::net::InetAddress address(ip, port);
+
+  // 创建TcpServer对象
+  m_muduo_server = std::make_shared<muduo::net::TcpServer>(&m_eventLoop, address, "RpcProvider");
+
+  // 绑定连接回调和消息读写回调方法
+  m_muduo_server->setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
+  m_muduo_server->setMessageCallback(
+      std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+
+  // 设置muduo库的线程数量
+  m_muduo_server->setThreadNum(4);
+
+  // rpc服务端准备启动，打印信息
+  std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
+
+  // 启动网络服务
+  m_muduo_server->start();
+  m_eventLoop.loop();
+}
+
+/**
+ * @brief 启动RPC服务节点（带就绪通知）
+ * @param ip 服务IP地址
+ * @param port 服务端口
+ * @param readyCallback 服务就绪后的回调函数
+ *
+ * 启动rpc服务节点，当服务完全就绪后调用回调函数通知外部
+ */
+void RpcProvider::Run(const std::string &ip, short port, std::function<void()> readyCallback)
+{
+  // 创建服务器地址
+  muduo::net::InetAddress address(ip, port);
+
+  // 创建TcpServer对象
+  m_muduo_server = std::make_shared<muduo::net::TcpServer>(&m_eventLoop, address, "RpcProvider");
+
+  // 绑定连接回调和消息读写回调方法
+  m_muduo_server->setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
+  m_muduo_server->setMessageCallback(
+      std::bind(&RpcProvider::OnMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
+
+  // 设置muduo库的线程数量
+  m_muduo_server->setThreadNum(4);
+
+  // rpc服务端准备启动，打印信息
+  std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
+
+  // 启动网络服务
+  m_muduo_server->start();
+
+  // 在事件循环中安排回调执行，确保服务完全就绪
+  m_eventLoop.runAfter(0.1, readyCallback); // 100ms后执行回调，确保服务已启动
+
+  m_eventLoop.loop();
+}
+
+/**
  * @brief 析构函数
  *
  * 清理资源，停止事件循环

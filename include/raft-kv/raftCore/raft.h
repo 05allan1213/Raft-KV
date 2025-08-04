@@ -94,7 +94,7 @@ private:
     Leader     // 领导者状态
   };
 
-  Status m_status; // 当前节点状态
+  std::atomic<Status> m_status; // 当前节点状态（使用atomic确保线程间可见性）
 
   monsoon::Channel<ApplyMsg>::ptr applyChan; // 客户端从这里取日志，client与raft通信的接口（使用Channel替代LockQueue）
 
@@ -398,6 +398,13 @@ public:
    */
   void init(std::vector<std::shared_ptr<RaftRpcUtil>> peers, int me, std::shared_ptr<Persister> persister,
             monsoon::Channel<ApplyMsg>::ptr applyCh);
+
+  /**
+   * @brief 启动选举定时器
+   *
+   * 手动启动选举定时器，用于延迟启动选举过程
+   */
+  void startElectionTimer();
 
   /**
    * @brief 设置状态大小变化回调函数

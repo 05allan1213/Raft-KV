@@ -30,17 +30,23 @@ std::string Clerk::Get(std::string key)
   args.set_clientid(m_clientId);
   args.set_requestid(requestId);
 
-  // 简化重试逻辑，最多重试3次
-  for (int retry = 0; retry < 3; retry++)
+  // 改进的重试逻辑，使用指数退避策略，最多重试10次
+  int maxRetries = 10;
+  int baseDelay = 100;         // 基础延迟100ms
+  int consecutiveFailures = 0; // 连续失败次数
+
+  for (int retry = 0; retry < maxRetries; retry++)
   {
     raftKVRpcProctoc::GetReply reply;
     bool ok = m_servers[server]->Get(&args, &reply);
 
-    DPrintf("[客户端] Get操作尝试 %d/3，服务器: %d，RPC结果: %s",
-            retry + 1, server, ok ? "成功" : "失败");
+    DPrintf("[客户端] Get操作尝试 %d/%d，服务器: %d，RPC结果: %s",
+            retry + 1, maxRetries, server, ok ? "成功" : "失败");
 
     if (ok)
     {
+      consecutiveFailures = 0; // 重置连续失败计数
+
       if (reply.err() == OK)
       {
         DPrintf("[客户端] Get操作成功，键: %s，值: %s", key.c_str(), reply.value().c_str());
@@ -57,15 +63,38 @@ std::string Clerk::Get(std::string key)
       {
         DPrintf("[客户端] 服务器%d不是领导者，尝试下一个服务器", server);
         server = (server + 1) % m_servers.size();
+        // 对于ErrWrongLeader，使用较短的延迟
+        if (retry < maxRetries - 1)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
       }
       else
       {
         DPrintf("[客户端] 服务器返回错误: %s", reply.err().c_str());
+        server = (server + 1) % m_servers.size();
+        // 对于未知错误，使用中等延迟
+        if (retry < maxRetries - 1)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
       }
     }
+    else
+    {
+      // RPC调用失败，可能是网络问题或服务器未就绪
+      consecutiveFailures++;
+      DPrintf("[客户端] RPC调用失败 (连续失败 %d 次)，尝试下一个服务器", consecutiveFailures);
+      server = (server + 1) % m_servers.size();
 
-    // 延迟后重试，让日志输出更慢
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+      // 对于RPC失败，使用指数退避延迟
+      if (retry < maxRetries - 1)
+      {
+        int delay = std::min(baseDelay * (1 << std::min(consecutiveFailures - 1, 4)), 2000);
+        DPrintf("[客户端] 等待 %dms 后重试...", delay);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+      }
+    }
   }
 
   // 所有重试都失败了
@@ -89,8 +118,12 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op)
   auto requestId = m_requestId;
   auto server = m_recentLeaderId;
 
-  // 简化重试逻辑，最多重试3次
-  for (int retry = 0; retry < 3; retry++)
+  // 改进的重试逻辑，使用指数退避策略，最多重试10次
+  int maxRetries = 10;
+  int baseDelay = 100;         // 基础延迟100ms
+  int consecutiveFailures = 0; // 连续失败次数
+
+  for (int retry = 0; retry < maxRetries; retry++)
   {
     // 构造Put/Append请求参数
     raftKVRpcProctoc::PutAppendArgs args;
@@ -104,11 +137,13 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op)
     raftKVRpcProctoc::PutAppendReply reply;
     bool ok = m_servers[server]->PutAppend(&args, &reply);
 
-    DPrintf("[客户端] %s操作尝试 %d/3，服务器: %d，RPC结果: %s",
-            op.c_str(), retry + 1, server, ok ? "成功" : "失败");
+    DPrintf("[客户端] %s操作尝试 %d/%d，服务器: %d，RPC结果: %s",
+            op.c_str(), retry + 1, maxRetries, server, ok ? "成功" : "失败");
 
     if (ok)
     {
+      consecutiveFailures = 0; // 重置连续失败计数
+
       if (reply.err() == OK)
       {
         DPrintf("[客户端] %s操作成功完成，键: %s", op.c_str(), key.c_str());
@@ -119,15 +154,38 @@ void Clerk::PutAppend(std::string key, std::string value, std::string op)
       {
         DPrintf("[客户端] 服务器%d不是领导者，尝试下一个服务器", server);
         server = (server + 1) % m_servers.size();
+        // 对于ErrWrongLeader，使用较短的延迟
+        if (retry < maxRetries - 1)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
       }
       else
       {
         DPrintf("[客户端] 服务器返回错误: %s", reply.err().c_str());
+        server = (server + 1) % m_servers.size();
+        // 对于未知错误，使用中等延迟
+        if (retry < maxRetries - 1)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
       }
     }
+    else
+    {
+      // RPC调用失败，可能是网络问题或服务器未就绪
+      consecutiveFailures++;
+      DPrintf("[客户端] RPC调用失败 (连续失败 %d 次)，尝试下一个服务器", consecutiveFailures);
+      server = (server + 1) % m_servers.size();
 
-    // 延迟后重试，让日志输出更慢
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+      // 对于RPC失败，使用指数退避延迟
+      if (retry < maxRetries - 1)
+      {
+        int delay = std::min(baseDelay * (1 << std::min(consecutiveFailures - 1, 4)), 2000);
+        DPrintf("[客户端] 等待 %dms 后重试...", delay);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+      }
+    }
   }
 
   // 所有重试都失败了

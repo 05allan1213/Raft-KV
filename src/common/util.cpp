@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <ctime>
 #include <iomanip>
+#include <thread>
 
 /**
  * @brief 断言函数实现
@@ -128,17 +129,17 @@ void DPrintf(const char *format, ...)
     va_list args;           // 声明可变参数列表
     va_start(args, format); // 初始化可变参数
 
-    // 打印时间戳：年-月-日 时:分:秒
-    std::printf("[%04d-%02d-%02d %02d:%02d:%02d] ",
-                nowtm->tm_year + 1900, // 年份（需要加1900）
-                nowtm->tm_mon + 1,     // 月份（需要加1，因为tm_mon从0开始）
-                nowtm->tm_mday,        // 日期
-                nowtm->tm_hour,        // 小时
-                nowtm->tm_min,         // 分钟
-                nowtm->tm_sec);        // 秒
+    // 使用更美观的时间戳格式：[时:分:秒]
+    std::printf("\033[36m[%02d:%02d:%02d]\033[0m ",
+                nowtm->tm_hour, // 小时
+                nowtm->tm_min,  // 分钟
+                nowtm->tm_sec); // 秒
 
     std::vprintf(format, args); // 打印格式化的消息内容
     std::printf("\n");          // 换行
     va_end(args);               // 结束可变参数处理
+
+    // 移除延迟，避免影响性能
+    // std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 }

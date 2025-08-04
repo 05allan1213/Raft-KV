@@ -175,8 +175,35 @@ void RaftRpcUtil::InstallSnapshotAsync(raftRpcProctoc::InstallSnapshotRequest *a
 RaftRpcUtil::RaftRpcUtil(std::string ip, short port)
 {
   //*********************************************  */
-  // 发送rpc设置
-  stub_ = new raftRpcProctoc::raftRpc_Stub(new MprpcChannel(ip, port, true));
+  // 发送rpc设置 - 使用延迟连接，避免在构造时立即连接
+  // 这样可以避免在其他节点RPC服务未就绪时的连接失败
+  stub_ = new raftRpcProctoc::raftRpc_Stub(new MprpcChannel(ip, port, false));
+}
+
+bool RaftRpcUtil::testConnection()
+{
+  try
+  {
+    // 创建一个简单的测试请求
+    raftRpcProctoc::RequestVoteArgs testArgs;
+    testArgs.set_term(-1); // 使用无效term作为测试标识
+    testArgs.set_candidateid(-1);
+    testArgs.set_lastlogindex(-1);
+    testArgs.set_lastlogterm(-1);
+
+    raftRpcProctoc::RequestVoteReply testReply;
+
+    // 尝试发送测试请求
+    // 注意：stub_->RequestVote 返回 void，我们通过是否抛出异常来判断连接状态
+    stub_->RequestVote(nullptr, &testArgs, &testReply, nullptr);
+
+    // 如果没有抛出异常，说明连接基本可用
+    return true;
+  }
+  catch (const std::exception &e)
+  {
+    return false; // 连接不可用
+  }
 }
 
 RaftRpcUtil::~RaftRpcUtil() { delete stub_; }

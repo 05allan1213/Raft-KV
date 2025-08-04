@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <cerrno>
 #include <string>
+#include <thread>
+#include <chrono>
+#include <algorithm>
 #include "mprpccontroller.h"
 #include "rpcheader.pb.h"
 #include "util.h"
@@ -28,20 +31,62 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
                               google::protobuf::RpcController *controller, const google::protobuf::Message *request,
                               google::protobuf::Message *response, google::protobuf::Closure *done)
 {
-  // 检查连接状态，如果未连接则尝试建立连接
+  // 检查连接状态，如果未连接则尝试建立连接，使用更健壮的重试机制
   if (m_clientFd == -1)
   {
     std::string errMsg;
-    bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
+    bool rt = false;
+    int maxRetries = 5;
+    int baseDelay = 200; // 基础延迟200ms
+
+    for (int retry = 0; retry < maxRetries && !rt; ++retry)
+    {
+      rt = newConnect(m_ip.c_str(), m_port, &errMsg);
+      if (rt)
+      {
+        DPrintf("🔗 [RPC连接] %s:%d 连接成功 (第%d次尝试)", m_ip.c_str(), m_port, retry + 1);
+        break;
+      }
+
+      DPrintf("❌ [RPC连接] %s:%d 连接失败 (第%d次尝试): %s", m_ip.c_str(), m_port, retry + 1, errMsg.c_str());
+
+      if (retry < maxRetries - 1)
+      {
+        // 指数退避延迟
+        int delay = std::min(baseDelay * (1 << retry), 2000);
+        DPrintf("⏳ [RPC连接] 等待 %dms 后重试连接...", delay);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+      }
+    }
+
     if (!rt)
     {
-      DPrintf("[func-MprpcChannel::CallMethod]重连接ip：{%s} port{%d}失败", m_ip.c_str(), m_port);
-      controller->SetFailed(errMsg);
+      DPrintf("[func-MprpcChannel::CallMethod]最终连接失败ip：{%s} port{%d} 在 %d 次尝试后: %s", m_ip.c_str(), m_port, maxRetries, errMsg.c_str());
+      controller->SetFailed(std::string("连接失败，已达到最大重试次数: ") + errMsg);
       return;
     }
-    else
+  }
+  else
+  {
+    // 连接存在，但需要检查连接是否仍然有效
+    // 使用 send 发送0字节数据来检测连接状态
+    int testResult = send(m_clientFd, "", 0, MSG_NOSIGNAL);
+    if (testResult == -1 && (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN))
     {
-      DPrintf("[func-MprpcChannel::CallMethod]连接ip：{%s} port{%d}成功", m_ip.c_str(), m_port);
+      DPrintf("[func-MprpcChannel::CallMethod]检测到连接已断开，重新建立连接");
+      close(m_clientFd);
+      m_clientFd = -1;
+
+      // 重新建立连接
+      std::string errMsg;
+      bool rt = newConnect(m_ip.c_str(), m_port, &errMsg);
+      if (!rt)
+      {
+        DPrintf("[func-MprpcChannel::CallMethod]重新连接失败: %s", errMsg.c_str());
+        controller->SetFailed(std::string("重新连接失败: ") + errMsg);
+        return;
+      }
+      DPrintf("[func-MprpcChannel::CallMethod]重新连接成功");
     }
   }
 
@@ -96,20 +141,56 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   send_rpc_str += args_str;
 
   // 发送rpc请求
-  // 失败会重试连接再发送，重试连接失败会直接return
-  while (-1 == send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), 0))
+  // 失败会重试连接再发送，使用指数退避策略，最多重试3次
+  int sendRetries = 0;
+  const int maxSendRetries = 3;
+  int baseDelay = 200; // 基础延迟200ms
+
+  while (sendRetries < maxSendRetries)
   {
+    if (send(m_clientFd, send_rpc_str.c_str(), send_rpc_str.size(), 0) != -1)
+    {
+      break; // 发送成功，跳出循环
+    }
+
+    // 发送失败，准备重试
+    sendRetries++;
     char errtxt[512] = {0};
     sprintf(errtxt, "send error! errno:%d", errno);
-    std::cout << "尝试重新连接，对方ip：" << m_ip << " 对方端口" << m_port << std::endl;
-    close(m_clientFd); // 关闭当前连接
-    m_clientFd = -1;   // 重置连接状态
-    std::string errMsg;
-    bool rt = newConnect(m_ip.c_str(), m_port, &errMsg); // 尝试重新连接
-    if (!rt)
+    std::cout << "发送失败 (尝试 " << sendRetries << "/" << maxSendRetries << ")，对方ip：" << m_ip << " 对方端口" << m_port << std::endl;
+
+    if (sendRetries >= maxSendRetries)
     {
-      controller->SetFailed(errMsg);
+      controller->SetFailed(std::string("发送失败，已达到最大重试次数: ") + errtxt);
       return;
+    }
+
+    // 只有在特定错误情况下才关闭连接重建
+    if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN)
+    {
+      std::cout << "检测到连接断开 (errno:" << errno << ")，重新建立连接" << std::endl;
+      close(m_clientFd); // 关闭当前连接
+      m_clientFd = -1;   // 重置连接状态
+
+      // 指数退避延迟
+      int delay = std::min(baseDelay * (1 << (sendRetries - 1)), 2000);
+      std::cout << "等待 " << delay << "ms 后重试连接..." << std::endl;
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+      std::string errMsg;
+      bool rt = newConnect(m_ip.c_str(), m_port, &errMsg); // 尝试重新连接
+      if (!rt)
+      {
+        controller->SetFailed(std::string("重连失败: ") + errMsg);
+        return;
+      }
+    }
+    else
+    {
+      // 对于其他错误，只是简单延迟后重试，不重建连接
+      int delay = std::min(baseDelay * (1 << (sendRetries - 1)), 1000);
+      std::cout << "等待 " << delay << "ms 后重试发送..." << std::endl;
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     }
   }
 
@@ -215,14 +296,27 @@ MprpcChannel::MprpcChannel(string ip, short port, bool connectNow)
     return; // 可以允许延迟连接
   }
 
-  // 尝试建立连接，最多重试3次
+  // 尝试建立连接，使用指数退避策略，最多重试5次
   std::string errMsg;
   auto rt = newConnect(ip.c_str(), port, &errMsg);
-  int tryCount = 3;
-  while (!rt && tryCount--)
+  int maxRetries = 5;
+  int baseDelay = 100; // 基础延迟100ms
+
+  for (int retry = 0; !rt && retry < maxRetries; ++retry)
   {
-    std::cout << errMsg << std::endl;
+    std::cout << "连接失败: " << errMsg << " (尝试 " << (retry + 1) << "/" << maxRetries << ")" << std::endl;
+
+    // 指数退避：每次重试延迟时间翻倍，最大不超过2秒
+    int delay = std::min(baseDelay * (1 << retry), 2000);
+    std::cout << "等待 " << delay << "ms 后重试连接到 " << ip << ":" << port << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
     rt = newConnect(ip.c_str(), port, &errMsg);
+  }
+
+  if (!rt)
+  {
+    std::cout << "最终连接失败到 " << ip << ":" << port << " 在 " << maxRetries << " 次尝试后: " << errMsg << std::endl;
   }
 }
 

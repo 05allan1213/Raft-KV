@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <functional>
 #include "google/protobuf/service.h"
 
 /**
@@ -37,6 +38,25 @@ public:
    * 启动rpc服务节点，开始提供rpc远程网络调用服务
    */
   void Run(int nodeIndex, short port);
+
+  /**
+   * @brief 启动RPC服务节点（指定IP地址）
+   * @param ip 服务IP地址
+   * @param port 服务端口
+   *
+   * 启动rpc服务节点，使用指定的IP地址，避免自动检测IP导致的地址不匹配问题
+   */
+  void Run(const std::string &ip, short port);
+
+  /**
+   * @brief 启动RPC服务节点（带就绪通知）
+   * @param ip 服务IP地址
+   * @param port 服务端口
+   * @param readyCallback 服务就绪后的回调函数
+   *
+   * 启动rpc服务节点，当服务完全就绪后调用回调函数通知外部
+   */
+  void Run(const std::string &ip, short port, std::function<void()> readyCallback);
 
 private:
   muduo::net::EventLoop m_eventLoop;                     // 组合EventLoop，用于事件循环

@@ -33,6 +33,12 @@ public:
                             InstallSnapshotCallback callback);
 
   /**
+   * @brief 测试RPC连接是否可用
+   * @return true 如果连接可用，false 否则
+   */
+  bool testConnection();
+
+  /**
    * @param ip  远端ip
    * @param port  远端端口
    */
