@@ -7,9 +7,6 @@
  * - 日志复制测试
  * - 快照机制测试
  * - 状态转换测试
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <gtest/gtest.h>

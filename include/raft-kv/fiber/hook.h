@@ -22,7 +22,7 @@ namespace monsoon
      * @param flag true表示启用hook，false表示禁用hook
      */
     void set_hook_enable(bool flag);
-} // namespace monsoon
+}
 
 extern "C"
 {

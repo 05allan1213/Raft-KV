@@ -21,8 +21,8 @@
  * @param response 响应消息
  * @param done 完成回调
  *
- * 所有通过stub代理对象调用的rpc方法，都会走到这里了，
- * 统一通过rpcChannel来调用方法，统一做rpc方法调用的数据序列化和网络发送
+ * 所有通过stub代理对象调用的RPC方法，都会走到这里，
+ * 统一通过RPC通道来调用方法，统一做RPC方法调用的数据序列化和网络发送
  *
  * 数据格式：
  * header_size + service_name method_name args_size + args
@@ -104,7 +104,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   }
   else
   {
-    controller->SetFailed("serialize request error!");
+    controller->SetFailed("序列化请求参数失败！");
     return;
   }
 
@@ -118,7 +118,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   std::string rpc_header_str;
   if (!rpcHeader.SerializeToString(&rpc_header_str))
   {
-    controller->SetFailed("serialize rpc header error!");
+    controller->SetFailed("序列化RPC头部失败！");
     return;
   }
 
@@ -140,7 +140,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   // 最后，将请求参数附加到send_rpc_str后面
   send_rpc_str += args_str;
 
-  // 发送rpc请求
+  // 发送RPC请求
   // 失败会重试连接再发送，使用指数退避策略，最多重试3次
   int sendRetries = 0;
   const int maxSendRetries = 3;
@@ -212,9 +212,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
   }
 
   // 反序列化rpc调用的响应数据
-  // std::string response_str(recv_buf, 0, recv_size); //
-  // bug：出现问题，recv_buf中遇到\0后面的数据就存不下来了，导致反序列化失败 if
-  // (!response->ParseFromString(response_str))
+  // std::string response_str(recv_buf, 0, recv_size);
   if (!response->ParseFromArray(recv_buf, recv_size))
   {
     char errtxt[1050] = {0};
@@ -498,7 +496,6 @@ bool MprpcChannel::sendAsyncRequest(const google::protobuf::MethodDescriptor *me
     {
       // 发送缓冲区满，需要等待
       DPrintf("[MprpcChannel::sendAsyncRequest] 发送缓冲区满，需要等待");
-      // TODO: 这里可以注册WRITE事件等待发送完成
       return false;
     }
     else
@@ -607,12 +604,6 @@ void MprpcChannel::handleAsyncResponse()
   }
 
   // 解析响应数据
-  // 简化版本：假设一次recv就能收到完整的响应
-  // 实际应用中可能需要处理分包情况
-
-  // 这里需要根据协议解析出requestId
-  // 由于当前协议没有在响应中包含requestId，我们假设响应是按顺序返回的
-  // 在实际实现中，应该修改协议在响应中包含requestId
 
   std::shared_ptr<AsyncRpcContext> context;
   {

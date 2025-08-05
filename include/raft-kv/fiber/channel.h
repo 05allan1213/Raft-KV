@@ -496,4 +496,4 @@ namespace monsoon
     void cleanupCase(SelectCase &selectCase);
   };
 
-} // namespace monsoon
+}

@@ -19,8 +19,6 @@
  * service_name =>  service描述
  *                        =》 service* 记录服务对象
  *                        method_name  =>  method方法对象
- *
- * @todo 待修改 要把本机开启的ip和端口写在文件里面
  */
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
@@ -52,11 +50,11 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
  * @param nodeIndex 节点索引
  * @param port 服务端口
  *
- * 启动rpc服务节点，开始提供rpc远程网络调用服务
+ * 启动RPC服务节点，开始提供RPC远程网络调用服务
  */
 void RpcProvider::Run(int nodeIndex, short port)
 {
-  // 获取可用ip地址
+  // 获取可用IP地址
   char *ipC;
   char hname[128];
   struct hostent *hent;
@@ -87,7 +85,7 @@ void RpcProvider::Run(int nodeIndex, short port)
   // 创建TcpServer对象
   m_muduo_server = std::make_shared<muduo::net::TcpServer>(&m_eventLoop, address, "RpcProvider");
 
-  // 绑定连接回调和消息读写回调方法  分离了网络代码和业务代码
+  // 绑定连接回调和消息读写回调方法，分离了网络代码和业务代码
   /*
   bind的作用：
   如果不使用std::bind将回调函数和TcpConnection对象绑定起来，那么在回调函数中就无法直接访问和修改TcpConnection对象的状态。因为回调函数是作为一个独立的函数被调用的，它没有当前对象的上下文信息（即this指针），也就无法直接访问当前对象的状态。
@@ -100,7 +98,7 @@ void RpcProvider::Run(int nodeIndex, short port)
   // 设置muduo库的线程数量
   m_muduo_server->setThreadNum(4);
 
-  // rpc服务端准备启动，打印信息
+  // RPC服务端准备启动，打印信息
   std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
 
   // 启动网络服务
@@ -128,7 +126,7 @@ void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
   // 如果是新连接就什么都不干，即正常的接收连接即可
   if (!conn->connected())
   {
-    // 和rpc client的连接断开了
+    // 和RPC客户端的连接断开了
     conn->shutdown(); // 关闭连接
   }
 }
@@ -139,7 +137,7 @@ void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
  * @param buffer 数据缓冲区
  * @param receiveTime 接收时间戳
  *
- * 如果远程有一个rpc服务的调用请求，那么OnMessage方法就会响应
+ * 如果远程有一个RPC服务的调用请求，那么OnMessage方法就会响应
  * 这里来的肯定是一个远程调用请求
  * 因此本函数需要：解析请求，根据服务名，方法名，参数，来调用service的来callmethod来调用本地的业务
  *
@@ -156,7 +154,7 @@ void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
  */
 void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net::Buffer *buffer, muduo::Timestamp)
 {
-  // 网络上接收的远程rpc调用请求的字符流    Login args
+  // 网络上接收的远程RPC调用请求的字符流    Login args
   std::string recv_buf = buffer->retrieveAllAsString();
 
   // 使用protobuf的CodedInputStream来解析数据流
@@ -166,7 +164,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
 
   coded_input.ReadVarint32(&header_size); // 解析header_size
 
-  // 根据header_size读取数据头的原始字符流，反序列化数据，得到rpc请求的详细信息
+  // 根据header_size读取数据头的原始字符流，反序列化数据，得到RPC请求的详细信息
   std::string rpc_header_str;
   mprpc::RpcHeader rpcHeader;
   std::string service_name;
@@ -192,7 +190,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
     return;
   }
 
-  // 获取rpc方法参数的字符流数据
+  // 获取RPC方法参数的字符流数据
   std::string args_str;
   // 直接读取args_size长度的字符串数据
   bool read_args_success = coded_input.ReadString(&args_str, args_size);
@@ -227,7 +225,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   google::protobuf::Service *service = it->second.m_service;      // 获取service对象  new UserService
   const google::protobuf::MethodDescriptor *method = mit->second; // 获取method对象  Login
 
-  // 生成rpc方法调用的请求request和响应response参数,由于是rpc的请求，因此请求需要通过request来序列化
+  // 生成RPC方法调用的请求request和响应response参数,由于是RPC的请求，因此请求需要通过request来序列化
   google::protobuf::Message *request = service->GetRequestPrototype(method).New(); // 创建请求对象
   if (!request->ParseFromString(args_str))                                         // 反序列化请求参数
   {
@@ -236,30 +234,18 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn, muduo::net
   }
   google::protobuf::Message *response = service->GetResponsePrototype(method).New(); // 创建响应对象
 
-  // 给下面的method方法的调用，绑定一个Closure的回调函数
+  // 给method方法的调用，绑定一个Closure的回调函数
   // closure是执行完本地方法之后会发生的回调，因此需要完成序列化和反向发送请求的操作
   google::protobuf::Closure *done =
       google::protobuf::NewCallback<RpcProvider, const muduo::net::TcpConnectionPtr &, google::protobuf::Message *>(
           this, &RpcProvider::SendRpcResponse, conn, response);
 
-  // 在框架上根据远端rpc请求，调用当前rpc节点上发布的方法
-  // new UserService().Login(controller, request, response, done)
-
-  /*
-  为什么下面这个service->CallMethod 要这么写？或者说为什么这么写就可以直接调用远程业务方法了
-  这个service在运行的时候会是注册的service
-  // 用户注册的service类 继承 .protoc生成的serviceRpc类 继承 google::protobuf::Service
-  // 用户注册的service类里面没有重写CallMethod方法，是 .protoc生成的serviceRpc类 里面重写了google::protobuf::Service中
-  的纯虚函数CallMethod，而 .protoc生成的serviceRpc类 会根据传入参数自动调取 生成的xx方法（如Login方法），
-  由于xx方法被 用户注册的service类 重写了，因此这个方法运行的时候会调用 用户注册的service类 的xx方法
-  真的是妙呀
-  */
   // 真正调用方法
   service->CallMethod(method, nullptr, request, response, done);
 }
 
 /**
- * @brief Closure的回调操作，用于序列化rpc的响应和网络发送
+ * @brief Closure的回调操作，用于序列化RPC的响应和网络发送
  * @param conn TCP连接指针
  * @param response RPC响应消息
  *
@@ -270,14 +256,13 @@ void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr &conn, goog
   std::string response_str;
   if (response->SerializeToString(&response_str)) // response进行序列化
   {
-    // 序列化成功后，通过网络把rpc方法执行的结果发送会rpc的调用方
+    // 序列化成功后，通过网络把RPC方法执行的结果发送会RPC的调用方
     conn->send(response_str);
   }
   else
   {
     std::cout << "serialize response_str error!" << std::endl;
   }
-  //    conn->shutdown(); // 模拟http的短链接服务，由rpcprovider主动断开连接  //改为长连接，不主动断开
 }
 
 /**
@@ -285,7 +270,7 @@ void RpcProvider::SendRpcResponse(const muduo::net::TcpConnectionPtr &conn, goog
  * @param ip 服务IP地址
  * @param port 服务端口
  *
- * 启动rpc服务节点，使用指定的IP地址，避免自动检测IP导致的地址不匹配问题
+ * 启动RPC服务节点，使用指定的IP地址，避免自动检测IP导致的地址不匹配问题
  */
 void RpcProvider::Run(const std::string &ip, short port)
 {
@@ -303,7 +288,7 @@ void RpcProvider::Run(const std::string &ip, short port)
   // 设置muduo库的线程数量
   m_muduo_server->setThreadNum(4);
 
-  // rpc服务端准备启动，打印信息
+  // RPC服务端准备启动，打印信息
   std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
 
   // 启动网络服务
@@ -317,7 +302,7 @@ void RpcProvider::Run(const std::string &ip, short port)
  * @param port 服务端口
  * @param readyCallback 服务就绪后的回调函数
  *
- * 启动rpc服务节点，当服务完全就绪后调用回调函数通知外部
+ * 启动RPC服务节点，当服务完全就绪后调用回调函数通知外部
  */
 void RpcProvider::Run(const std::string &ip, short port, std::function<void()> readyCallback)
 {
@@ -335,7 +320,7 @@ void RpcProvider::Run(const std::string &ip, short port, std::function<void()> r
   // 设置muduo库的线程数量
   m_muduo_server->setThreadNum(4);
 
-  // rpc服务端准备启动，打印信息
+  // RPC服务端准备启动，打印信息
   std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
 
   // 启动网络服务

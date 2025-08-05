@@ -114,7 +114,6 @@ namespace monsoon
   {
     FdContext *fd_ctx = nullptr;
     RWMutex::ReadLock lock(mutex_); // 加读锁
-    // TODO：可以使用map代替
     // 找到fd对应的fdContext,没有则创建
     if ((int)fdContexts_.size() > fd)
     {
@@ -371,7 +370,6 @@ namespace monsoon
         {
           // pipe管道内数据无意义，只是tickle意义,读完即可
           uint8_t dummy[256];
-          // TODO：ET下阻塞读取可能有问题
           while (read(tickleFds_[0], dummy, sizeof(dummy)) > 0)
             ;
           continue;
@@ -464,4 +462,4 @@ namespace monsoon
   }
   void IOManager::OnTimerInsertedAtFront() { tickle(); }
 
-} // namespace monsoon
+}

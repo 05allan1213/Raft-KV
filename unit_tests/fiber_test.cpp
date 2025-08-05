@@ -7,9 +7,6 @@
  * - Scheduler 调度器测试
  * - IOManager IO管理器测试
  * - Thread 线程类测试
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <gtest/gtest.h>

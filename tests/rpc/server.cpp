@@ -9,9 +9,6 @@
  * - 错误处理机制
  * - 并发请求处理
  * - 性能监控
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <iostream>

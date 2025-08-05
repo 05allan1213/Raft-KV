@@ -350,10 +350,10 @@ int main()
     generate_config(CLUSTER_SIZE);
     start_cluster(CLUSTER_SIZE);
 
-    // 大幅增加等待时间，确保所有节点都完成初始化
-    // 根据我们的启动逻辑：基础等待8秒 + 节点特定延迟(最大6秒) + 连接建立时间 + Raft初始化时间(10秒)
-    int clusterStabilizationTime = 60;      // 基础等待时间60秒
-    int additionalTime = CLUSTER_SIZE * 10; // 每个节点额外等待10秒
+    // 适当等待时间，确保所有节点都完成初始化
+    // 根据我们的启动逻辑：基础等待时间 + 节点特定延迟 + 连接建立时间 + Raft初始化时间
+    int clusterStabilizationTime = 20;     // 基础等待时间20秒
+    int additionalTime = CLUSTER_SIZE * 5; // 每个节点额外等待5秒
     int totalWaitTime = clusterStabilizationTime + additionalTime;
 
     std::cout << "\n[主控] 等待集群稳定和领导者选举 (" << totalWaitTime << "秒)..." << std::endl;

@@ -11,9 +11,6 @@
  * - Channel协程通信功能
  * - 文件描述符管理
  * - 定时器功能测试
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <arpa/inet.h>

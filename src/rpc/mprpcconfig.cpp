@@ -16,12 +16,12 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
   FILE *pf = fopen(config_file, "r");
   if (nullptr == pf)
   {
-    std::cout << config_file << " is note exist!" << std::endl;
+    std::cout << config_file << " 文件不存在！" << std::endl;
     exit(EXIT_FAILURE); // 文件不存在时退出程序
   }
 
   // 逐行读取配置文件内容
-  // 1.注释   2.正确的配置项 =    3.去掉开头的多余的空格
+  // 处理三种情况：1.注释行 2.正确的配置项 3.去掉开头的多余空格
   while (!feof(pf))
   {
     char buf[512] = {0}; // 缓冲区，用于存储每行内容
@@ -31,7 +31,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
     std::string read_buf(buf);
     Trim(read_buf);
 
-    // 判断#的注释行或空行，跳过这些行
+    // 判断是否为注释行（以#开头）或空行，跳过这些行
     if (read_buf[0] == '#' || read_buf.empty())
     {
       continue;
@@ -41,7 +41,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
     int idx = read_buf.find('=');
     if (idx == -1)
     {
-      // 配置项不合法，没有等号分隔符
+      // 配置项不合法，没有等号分隔符，跳过该行
       continue;
     }
 
@@ -51,7 +51,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
     key = read_buf.substr(0, idx); // 提取等号前的部分作为键
     Trim(key);                     // 去除键的前后空格
 
-    // rpcserverip=127.0.0.1\n
+    // 处理值部分，例如：rpcserverip=127.0.0.1\n
     int endidx = read_buf.find('\n', idx);              // 查找换行符位置
     value = read_buf.substr(idx + 1, endidx - idx - 1); // 提取等号后的部分作为值
     Trim(value);                                        // 去除值的前后空格

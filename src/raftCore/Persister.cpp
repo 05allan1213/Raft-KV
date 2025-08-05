@@ -55,6 +55,12 @@ std::string Persister::ReadSnapshot()
   return snapshot;
 }
 
+/**
+ * @brief 保存Raft状态数据
+ * @param data 要保存的状态数据
+ *
+ * 将Raft状态数据保存到本地文件，并更新状态大小
+ */
 void Persister::SaveRaftState(const std::string &data)
 {
   std::lock_guard<std::mutex> lg(m_mtx);
@@ -67,6 +73,10 @@ void Persister::SaveRaftState(const std::string &data)
   m_raftStateSize = data.size();
 }
 
+/**
+ * @brief 获取Raft状态数据大小
+ * @return 状态数据的大小（字节数）
+ */
 long long Persister::RaftStateSize()
 {
   std::lock_guard<std::mutex> lg(m_mtx);
@@ -74,6 +84,10 @@ long long Persister::RaftStateSize()
   return m_raftStateSize;
 }
 
+/**
+ * @brief 读取Raft状态数据
+ * @return 状态数据字符串，如果文件不存在或读取失败返回空字符串
+ */
 std::string Persister::ReadRaftState()
 {
   std::lock_guard<std::mutex> lg(m_mtx);
@@ -89,15 +103,19 @@ std::string Persister::ReadRaftState()
   return snapshot;
 }
 
+/**
+ * @brief 构造函数
+ * @param me 节点ID
+ *
+ * 初始化持久化器，创建对应的文件并打开输出流
+ */
 Persister::Persister(const int me)
     : m_raftStateFileName("raftstatePersist" + std::to_string(me) + ".txt"),
       m_snapshotFileName("snapshotPersist" + std::to_string(me) + ".txt"),
       m_streamingSnapshotFileName("streamingSnapshotPersist" + std::to_string(me) + ".txt"),
       m_raftStateSize(0)
 {
-  /**
-   * 检查文件状态并清空文件
-   */
+  // 检查文件状态并清空文件
   bool fileOpenFlag = true;
   std::fstream file(m_raftStateFileName, std::ios::out | std::ios::trunc);
   if (file.is_open())
@@ -119,15 +137,18 @@ Persister::Persister(const int me)
   }
   if (!fileOpenFlag)
   {
-    DPrintf("[func-Persister::Persister] file open error");
+    DPrintf("[func-Persister::Persister] 文件打开失败");
   }
-  /**
-   * 绑定流
-   */
+  // 绑定流
   m_raftStateOutStream.open(m_raftStateFileName);
   m_snapshotOutStream.open(m_snapshotFileName);
 }
 
+/**
+ * @brief 析构函数
+ *
+ * 关闭所有打开的文件流
+ */
 Persister::~Persister()
 {
   if (m_raftStateOutStream.is_open())
@@ -140,6 +161,11 @@ Persister::~Persister()
   }
 }
 
+/**
+ * @brief 清空Raft状态数据
+ *
+ * 重置状态大小并清空状态文件内容
+ */
 void Persister::clearRaftState()
 {
   m_raftStateSize = 0;
@@ -152,6 +178,11 @@ void Persister::clearRaftState()
   m_raftStateOutStream.open(m_raftStateFileName, std::ios::out | std::ios::trunc);
 }
 
+/**
+ * @brief 清空快照数据
+ *
+ * 清空快照文件内容
+ */
 void Persister::clearSnapshot()
 {
   if (m_snapshotOutStream.is_open())
@@ -161,12 +192,24 @@ void Persister::clearSnapshot()
   m_snapshotOutStream.open(m_snapshotFileName, std::ios::out | std::ios::trunc);
 }
 
+/**
+ * @brief 清空Raft状态和快照数据
+ *
+ * 同时清空状态文件和快照文件
+ */
 void Persister::clearRaftStateAndSnapshot()
 {
   clearRaftState();
   clearSnapshot();
 }
 
+/**
+ * @brief 保存流式快照
+ * @param snapshotFilePath 临时快照文件路径
+ * @return 保存是否成功
+ *
+ * 将临时快照文件复制到持久化位置
+ */
 bool Persister::SaveStreamingSnapshot(const std::string &snapshotFilePath)
 {
   std::lock_guard<std::mutex> lg(m_mtx);
@@ -177,14 +220,14 @@ bool Persister::SaveStreamingSnapshot(const std::string &snapshotFilePath)
     std::ifstream src(snapshotFilePath, std::ios::binary);
     if (!src.is_open())
     {
-      DPrintf("[Persister::SaveStreamingSnapshot] Failed to open source file: %s", snapshotFilePath.c_str());
+      DPrintf("[Persister::SaveStreamingSnapshot] 无法打开源文件: %s", snapshotFilePath.c_str());
       return false;
     }
 
     std::ofstream dst(m_streamingSnapshotFileName, std::ios::binary | std::ios::trunc);
     if (!dst.is_open())
     {
-      DPrintf("[Persister::SaveStreamingSnapshot] Failed to open destination file: %s",
+      DPrintf("[Persister::SaveStreamingSnapshot] 无法打开目标文件: %s",
               m_streamingSnapshotFileName.c_str());
       return false;
     }
@@ -195,17 +238,23 @@ bool Persister::SaveStreamingSnapshot(const std::string &snapshotFilePath)
     src.close();
     dst.close();
 
-    DPrintf("[Persister::SaveStreamingSnapshot] Saved streaming snapshot to: %s",
+    DPrintf("[Persister::SaveStreamingSnapshot] 流式快照已保存到: %s",
             m_streamingSnapshotFileName.c_str());
     return true;
   }
   catch (const std::exception &e)
   {
-    DPrintf("[Persister::SaveStreamingSnapshot] Exception: %s", e.what());
+    DPrintf("[Persister::SaveStreamingSnapshot] 异常: %s", e.what());
     return false;
   }
 }
 
+/**
+ * @brief 读取流式快照
+ * @return 快照文件路径，如果文件不存在返回空字符串
+ *
+ * 检查流式快照文件是否存在并返回文件路径
+ */
 std::string Persister::ReadStreamingSnapshot()
 {
   std::lock_guard<std::mutex> lg(m_mtx);
@@ -214,12 +263,12 @@ std::string Persister::ReadStreamingSnapshot()
   std::ifstream file(m_streamingSnapshotFileName);
   if (!file.good())
   {
-    DPrintf("[Persister::ReadStreamingSnapshot] File not found: %s", m_streamingSnapshotFileName.c_str());
+    DPrintf("[Persister::ReadStreamingSnapshot] 文件未找到: %s", m_streamingSnapshotFileName.c_str());
     return "";
   }
   file.close();
 
-  DPrintf("[Persister::ReadStreamingSnapshot] Found streaming snapshot: %s",
+  DPrintf("[Persister::ReadStreamingSnapshot] 找到流式快照: %s",
           m_streamingSnapshotFileName.c_str());
   return m_streamingSnapshotFileName;
 }

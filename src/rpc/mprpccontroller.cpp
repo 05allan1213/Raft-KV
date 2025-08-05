@@ -55,7 +55,7 @@ void MprpcController::SetFailed(const std::string &reason)
 /**
  * @brief 开始取消操作
  *
- * 目前未实现具体的功能
+ * 目前未实现具体的功能，预留接口用于后续扩展
  */
 void MprpcController::StartCancel() {}
 
@@ -74,6 +74,6 @@ bool MprpcController::IsCanceled() const
  * @brief 设置取消回调
  * @param callback 取消时的回调函数
  *
- * 目前未实现具体的功能
+ * 目前未实现具体的功能，预留接口用于后续扩展
  */
 void MprpcController::NotifyOnCancel(google::protobuf::Closure *callback) {}

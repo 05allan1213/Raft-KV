@@ -209,7 +209,6 @@ expected_binaries=(
     "bin/integration_test"
     "bin/server"
     "bin/client"
-    "bin/raft_test"
     "bin/unit_tests"
 )
 

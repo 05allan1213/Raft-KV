@@ -9,12 +9,12 @@
 
 const bool Debug = true; // 调试模式开关
 
-const int debugMul = 1;                      // 时间单位：time.Millisecond，不同网络环境rpc速度不同，因此需要乘以一个系数
-const int HeartBeatTimeout = 300 * debugMul; // 心跳时间一般要比选举超时小一个数量级（调整为300ms，减慢日志输出）
-const int ApplyInterval = 1000 * debugMul;   // 应用日志的时间间隔（调整为1000ms，减慢日志输出）
+const int debugMul = 1;                       // 时间单位：time.Millisecond，不同网络环境rpc速度不同，因此需要乘以一个系数
+const int HeartBeatTimeout = 1000 * debugMul; // 心跳时间一般要比选举超时小一个数量级（调整为1000ms，进一步减慢日志输出）
+const int ApplyInterval = 1000 * debugMul;    // 应用日志的时间间隔（调整为1000ms，减慢日志输出）
 
-const int minRandomizedElectionTime = 800 * debugMul;  // 最小随机化选举超时时间（毫秒）- 增加到800ms
-const int maxRandomizedElectionTime = 1500 * debugMul; // 最大随机化选举超时时间（毫秒）- 增加到1500ms
+const int minRandomizedElectionTime = 3000 * debugMul; // 最小随机化选举超时时间（毫秒）- 调整为3000ms，确保心跳间隔的3倍以上
+const int maxRandomizedElectionTime = 5000 * debugMul; // 最大随机化选举超时时间（毫秒）- 调整为5000ms，确保心跳间隔的5倍
 
 const int CONSENSUS_TIMEOUT = 500 * debugMul; // 共识超时时间（毫秒）
 

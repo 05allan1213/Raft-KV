@@ -30,4 +30,4 @@ namespace monsoon
      */
     Nonecopyable operator=(const Nonecopyable) = delete;
   };
-} // namespace monsoon
+}

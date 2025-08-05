@@ -285,4 +285,4 @@ namespace monsoon
   private:
     pthread_rwlock_t m_; // POSIX读写锁
   };
-} // namespace monsoon
+}

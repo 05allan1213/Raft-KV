@@ -9,9 +9,6 @@
  * - 并发请求测试
  * - 错误处理和超时测试
  * - 性能基准测试
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <iostream>

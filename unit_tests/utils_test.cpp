@@ -7,9 +7,6 @@
  * - Channel 协程通信测试
  * - LockQueue 线程安全队列测试
  * - Op 操作对象测试
- *
- * @author Raft-KV Team
- * @date 2024
  */
 
 #include <gtest/gtest.h>

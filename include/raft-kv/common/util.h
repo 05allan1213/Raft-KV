@@ -73,7 +73,7 @@ void DPrintf(const char *format, ...);
  *
  * 如果条件为false，则输出错误信息并退出程序
  */
-void myAssert(bool condition, std::string message = "Assertion failed!");
+void myAssert(bool condition, std::string message = "断言失败!");
 
 /**
  * @brief 字符串格式化函数
@@ -97,12 +97,12 @@ std::string format(const char *format_str, Args... args)
     int size_s = std::snprintf(nullptr, 0, format_str, args...) + 1; // "\0"
     if (size_s <= 0)
     {
-      throw std::runtime_error("Error during formatting.");
+      throw std::runtime_error("格式化过程中发生错误。");
     }
     auto size = static_cast<size_t>(size_s);
     std::vector<char> buf(size);
     std::snprintf(buf.data(), size, format_str, args...);
-    return std::string(buf.data(), buf.data() + size - 1); // remove '\0'
+    return std::string(buf.data(), buf.data() + size - 1); // 移除 '\0'
   }
 }
 
@@ -210,15 +210,6 @@ private:
   std::mutex m_mutex;                     // 互斥锁，保护队列访问
   std::condition_variable m_condvariable; // 条件变量，用于线程同步
 };
-// 两个对锁的管理用到了RAII的思想，防止中途出现问题而导致资源无法释放的问题！！！
-// std::lock_guard 和 std::unique_lock 都是 C++11 中用来管理互斥锁的工具类，它们都封装了 RAII（Resource Acquisition Is
-// Initialization）技术，使得互斥锁在需要时自动加锁，在不需要时自动解锁，从而避免了很多手动加锁和解锁的繁琐操作。
-// std::lock_guard 是一个模板类，它的模板参数是一个互斥量类型。当创建一个 std::lock_guard
-// 对象时，它会自动地对传入的互斥量进行加锁操作，并在该对象被销毁时对互斥量进行自动解锁操作。std::lock_guard
-// 不能手动释放锁，因为其所提供的锁的生命周期与其绑定对象的生命周期一致。 std::unique_lock
-// 也是一个模板类，同样的，其模板参数也是互斥量类型。不同的是，std::unique_lock 提供了更灵活的锁管理功能。可以通过
-// lock()、unlock()、try_lock() 等方法手动控制锁的状态。当然，std::unique_lock 也支持 RAII
-// 技术，即在对象被销毁时会自动解锁。另外， std::unique_lock 还支持超时等待和可中断等待的操作。
 
 /**
  * @brief KV操作类，用于在KV存储和Raft之间传递命令
@@ -229,20 +220,14 @@ private:
 class Op
 {
 public:
-  // Your definitions here.
-  // Field names must start with capital letters,
-  // otherwise RPC will break.
+  // 字段名必须以大写字母开头，否则RPC会中断
   std::string Operation; // "Get" "Put" "Append" - 操作类型
   std::string Key;       // 键名
   std::string Value;     // 值
   std::string ClientId;  // 客户端号码
   int RequestId;         // 客户端号码请求的Request的序列号，为了保证线性一致性
-                         //  IfDuplicate bool // Duplicate command can't be applied twice , but only for PUT and APPEND
 
 public:
-  // todo
-  // 为了协调raftRPC中的command只设置成了string,这个的限制就是正常字符中不能包含|
-  // 当然后期可以换成更高级的序列化方法，比如protobuf
   /**
    * @brief 将Op对象序列化为字符串
    * @return 序列化后的字符串
@@ -254,9 +239,8 @@ public:
     std::stringstream ss;
     boost::archive::text_oarchive oa(ss);
 
-    // write class instance to archive
+    // 将类实例写入归档
     oa << *this;
-    // close archive
 
     return ss.str();
   }
@@ -272,9 +256,9 @@ public:
   {
     std::stringstream iss(str);
     boost::archive::text_iarchive ia(iss);
-    // read class state from archive
+    // 从归档中读取类状态
     ia >> *this;
-    return true; // todo : 解析失敗如何處理，要看一下boost庫了
+    return true; // 解析失败如何处理，需要查看boost库
   }
 
 public:
@@ -309,13 +293,13 @@ private:
   }
 };
 
-///////////////////////////////////////////////kvserver reply err to clerk
+// kvserver 返回错误码给 clerk
 
 const std::string OK = "OK";                         // 操作成功
 const std::string ErrNoKey = "ErrNoKey";             // 键不存在错误
 const std::string ErrWrongLeader = "ErrWrongLeader"; // 错误的领导者错误
 
-////////////////////////////////////获取可用端口
+// 获取可用端口
 
 /**
  * @brief 检查端口是否可用

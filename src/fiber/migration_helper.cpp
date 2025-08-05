@@ -16,4 +16,4 @@ namespace monsoon
   template class MigrationHelper::LockQueueWrapper<ApplyMsg>;
   template class MigrationHelper::LockQueueWrapper<Op>;
 
-} // namespace monsoon
+}
